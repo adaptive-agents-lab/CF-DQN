@@ -38,7 +38,7 @@ if [[ "$SWEEP_ID" == *"YOUR_ENTITY"* ]]; then
     exit 1
 fi
 
-source .ven/bin/activate
+uv sync
 
 # Create log directory if it doesn't exist
 mkdir -p slurm/logs
