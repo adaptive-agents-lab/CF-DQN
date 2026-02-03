@@ -49,14 +49,6 @@ pettingzoo = [
     "SuperSuit==3.4.0",
     "multi-agent-ale-py==0.1.11",
 ]
-jax = [
-    "jax==0.4.8",
-    "jaxlib==0.4.7",
-    "flax==0.6.8",
-    "optax==0.1.4",
-    "chex==0.1.5",
-    "scipy<1.13.0"
-]
 optuna = [
     "optuna>=3.0.1,<4",
     "optuna-dashboard>=0.7.2,<0.8",

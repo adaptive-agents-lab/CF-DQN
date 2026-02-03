@@ -178,6 +178,7 @@ if __name__ == "__main__":
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
+    episode_count = 0  # Track total number of completed episodes
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
@@ -210,9 +211,19 @@ if __name__ == "__main__":
             if "final_info" in infos:
                 for info in infos["final_info"]:
                     if info and "episode" in info:
-                        print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                        writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                        writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+                        episode_count += 1
+                        episode_return = info['episode']['r']
+                        episode_length = info['episode']['l']
+                        print(f"global_step={global_step}, episode={episode_count}, episodic_return={episode_return}, episodic_length={episode_length}")
+                        writer.add_scalar("charts/episodic_return", episode_return, global_step)
+                        writer.add_scalar("charts/episodic_length", episode_length, global_step)
+                        
+                        # Log return by episode count for fair comparison across algorithms
+                        writer.add_scalar("charts/episodic_return_by_episode", episode_return, episode_count)
+                        
+                        # Log return at every 100th episode for milestone tracking
+                        if episode_count % 100 == 0:
+                            writer.add_scalar("charts/episodic_return_per_100_episodes", episode_return, episode_count)
 
         # bootstrap value if not done
         with torch.no_grad():
