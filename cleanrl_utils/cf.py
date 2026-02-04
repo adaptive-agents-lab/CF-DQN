@@ -385,6 +385,30 @@ def collapse_cf_to_mean( #! THIS IS WHAT CAUSES THE INSTABILITY PROBLEM
     
     return mu
 
+def complex_huber_loss(pred, target, delta=1.0):
+    """
+    Huber loss for complex-valued predictions.
+    Less sensitive to outliers than MSE.
+    
+    Args:
+        pred: predicted CF, shape [..., K]
+        target: target CF, shape [..., K]
+        delta: Huber loss threshold
+    
+    Returns:
+        scalar loss
+    """
+    # Compute element-wise distance
+    diff = pred - target
+    abs_diff = torch.abs(diff)
+    
+    # Huber loss: quadratic below delta, linear above
+    quadratic = 0.5 * (abs_diff ** 2)
+    linear = delta * (abs_diff - 0.5 * delta)
+    loss_per_element = torch.where(abs_diff <= delta, quadratic, linear)
+    
+    return torch.mean(loss_per_element)
+
 
 # -----------------------------------------------------------------------------
 # Reward CF

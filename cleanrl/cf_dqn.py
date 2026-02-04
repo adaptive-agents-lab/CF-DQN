@@ -20,6 +20,7 @@ from cleanrl_utils.cf import (
     collapse_cf_to_mean,
     reward_cf,
     complex_mse_loss,
+    complex_huber_loss,
 )
 
 
@@ -65,6 +66,18 @@ class Args:
     """maximum frequency W (grid spans [-W, W])"""
     collapse_max_w: float = 2.0
     """max |omega| used for gaussian collapse method"""
+    reward_scale: float = 1.0  # Scale rewards down
+    """scale factor for rewards before CF computation"""
+    clip_rewards: bool = False
+    """whether to clip rewards to [-1, 1] for CF stability"""
+    normalize_rewards: bool = False
+    """whether to normalize rewards to zero mean and unit std"""
+    reward_clip_range: float = None  # Auto-compute based on freq_max
+    """max absolute reward value (auto: π/freq_max to avoid phase wrapping)"""
+    tau: float = 0.005
+    """polyak averaging coefficient for target network (0 = hard update, 1 = no update)"""
+    use_polyak: bool = True
+    """whether to use polyak averaging instead of hard updates"""
     
     buffer_size: int = 10000
     """the replay memory buffer size"""
@@ -86,6 +99,8 @@ class Args:
     """the frequency of training"""
     penalty_weight: float = 5.0
     """the weight of the penalty for the φ(0) constraint"""
+    loss_type: str = "complex_mse"
+    """the type of loss function to use (complex_mse)"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -337,9 +352,29 @@ if __name__ == "__main__":
                     next_cf_scaled = interpolate_cf_polar(scaled_omegas, omegas, next_cf_greedy)
                     # [batch, K]
                     
-                    # Compute reward CF: exp(i * omega * reward)
-                    cf_reward = reward_cf(omegas, data.rewards.flatten())  # [batch, K]
+                    #! Clipping or scalaing rewards
+                    # Clip rewards to [-1, 1] for CF stability
+                    if args.clip_rewards:
+                        # Auto-compute safe clipping range: π/ω_max ensures phases < π (no wrapping)
+                        clip_range = args.reward_clip_range or (np.pi / args.freq_max)
+                        modified_rewards = torch.clamp(data.rewards.flatten(), -clip_range, clip_range)
+                        
+                    elif args.normalize_rewards:
+                        reward_mean = data.rewards.mean()
+                        reward_std = data.rewards.std() + 1e-8
+                        normalized_rewards = (data.rewards.flatten() - reward_mean) / reward_std
+                        # Soft clip to prevent extreme outliers
+                        normalized_rewards = torch.clamp(normalized_rewards, -args.reward_norm_clip, args.reward_norm_clip)
+                        # Scale to safe range for CF (phases < π)
+                        safe_scale = (np.pi / args.freq_max) / args.reward_norm_clip
+                        scaled_rewards = normalized_rewards * safe_scale
                     
+                    else:
+                        modified_rewards = data.rewards.flatten() * args.reward_scale
+                    
+                    cf_reward = reward_cf(omegas, modified_rewards) 
+                    
+
                     # CF Bellman target:
                     # target = reward_cf * next_cf_scaled * (1 - done) + reward_cf * done
                     # When done=1, future CF = 1 (zero future return)
@@ -352,7 +387,11 @@ if __name__ == "__main__":
                 # [batch, K]
                 
                 # L2 loss in frequency domain: |pred - target|^2
-                loss = complex_mse_loss(pred_cf, target_cf)
+                if args.loss_type == "complex_mse":
+                    loss = complex_mse_loss(pred_cf, target_cf)
+                if args.loss_type == "complex_huber":
+                    loss = complex_huber_loss(pred_cf, target_cf, delta=1.0)
+
                 
                 # Add soft constraint for φ(0) ≈ 1 (preserves derivative for mean extraction)
                 cf_at_zero_idx = torch.argmin(torch.abs(q_network.omegas)).item()
@@ -371,50 +410,159 @@ if __name__ == "__main__":
                     writer.add_scalar("losses/loss", loss.item(), global_step)
                     writer.add_scalar("losses/phi_zero_penalty", phi_zero_penalty.item(), global_step)
                     
-                    # Diagnostic: Check rewards from replay buffer
+                    # ==================== COMPREHENSIVE CF DIAGNOSTICS ====================
+                    
+                    # 0. COMPUTE Q-VALUES FIRST (needed for other diagnostics)
+                    with torch.no_grad():
+                        all_cf, all_q_values = q_network.get_all_cf(data.observations)
+                    
+                    # 1. REWARD STATISTICS - Check if normalization/clipping is working
                     writer.add_scalar("debug/rewards_mean", data.rewards.mean().item(), global_step)
                     writer.add_scalar("debug/rewards_std", data.rewards.std().item(), global_step)
                     writer.add_scalar("debug/rewards_min", data.rewards.min().item(), global_step)
                     writer.add_scalar("debug/rewards_max", data.rewards.max().item(), global_step)
+                    writer.add_scalar("debug/modified_rewards_mean", modified_rewards.mean().item(), global_step)
+                    writer.add_scalar("debug/modified_rewards_std", modified_rewards.std().item(), global_step)
                     
-                    # Diagnostic: Check reward CF properties
-                    cf_reward_phase_std = torch.angle(cf_reward).std()
-                    writer.add_scalar("debug/reward_cf_phase_std", cf_reward_phase_std.item(), global_step)
+                    # 2. PHASE WRAPPING CHECK - The main culprit
+                    # CHECK IMMEDIATE REWARD PHASES (should always be safe)
+                    max_phase_immediate = (torch.abs(q_network.omegas).max() * torch.abs(modified_rewards).max()).item()
+                    writer.add_scalar("debug/max_phase_immediate_radians", max_phase_immediate, global_step)
                     
-                    # Log collapsed Q-values for predicted CF
-                    q_values_pred = collapse_cf_to_mean(q_network.omegas, pred_cf, max_w=args.collapse_max_w)
-                    writer.add_scalar("losses/q_values", q_values_pred.mean().item(), global_step)
+                    # CHECK Q-VALUE PHASES (this is where wrapping actually happens!)
+                    # Q-values represent cumulative returns - these can be huge
+                    max_q_value = all_q_values.max().item()
+                    max_phase_qvalues = (torch.abs(q_network.omegas).max() * max_q_value).item()
+                    writer.add_scalar("debug/max_phase_qvalues_radians", max_phase_qvalues, global_step)
+                    writer.add_scalar("debug/max_phase_qvalues_rotations", max_phase_qvalues / (2 * np.pi), global_step)
+                    writer.add_scalar("debug/phase_is_wrapped", float(max_phase_qvalues > np.pi), global_step)
                     
-                    # Diagnostic: Manually compute mean using finite difference at ω=0
+                    # CHECK PREDICTED CF PHASES (actual phase distribution in network output)
+                    pred_cf_phases = torch.angle(pred_cf)
+                    writer.add_scalar("debug/pred_cf_phase_std", pred_cf_phases.std().item(), global_step)
+                    writer.add_scalar("debug/pred_cf_phase_range", 
+                                    (pred_cf_phases.max() - pred_cf_phases.min()).item(), global_step)
+                    
+                    # CHECK TARGET CF PHASES (what we're trying to match)
+                    target_cf_phases = torch.angle(target_cf)
+                    writer.add_scalar("debug/target_cf_phase_std", target_cf_phases.std().item(), global_step)
+                    writer.add_scalar("debug/target_cf_phase_range", 
+                                    (target_cf_phases.max() - target_cf_phases.min()).item(), global_step)
+                    
+                    # Check actual phase variance in reward CF
+                    cf_reward_phases = torch.angle(cf_reward)
+                    writer.add_scalar("debug/reward_cf_phase_std", cf_reward_phases.std().item(), global_step)
+                    writer.add_scalar("debug/reward_cf_phase_range", 
+                                    (cf_reward_phases.max() - cf_reward_phases.min()).item(), global_step)
+                    
+                    # 3. PHI(0) = 1 CONSTRAINT - Check if CF is properly normalized
                     zero_idx = torch.argmin(torch.abs(q_network.omegas)).item()
+                    pred_at_zero_mag = torch.abs(pred_at_zero)
+                    target_at_zero_mag = torch.abs(target_at_zero)
+                    
+                    writer.add_scalar("cf/pred_phi0_magnitude_mean", pred_at_zero_mag.mean().item(), global_step)
+                    writer.add_scalar("cf/pred_phi0_magnitude_std", pred_at_zero_mag.std().item(), global_step)
+                    writer.add_scalar("cf/target_phi0_magnitude_mean", target_at_zero_mag.mean().item(), global_step)
+                    writer.add_scalar("cf/pred_phi0_deviation_from_1", torch.abs(pred_at_zero_mag - 1.0).mean().item(), global_step)
+                    writer.add_scalar("cf/target_phi0_deviation_from_1", torch.abs(target_at_zero_mag - 1.0).mean().item(), global_step)
+                    
+                    # 4. CF SMOOTHNESS - Check if CF is well-behaved across frequencies
+                    # A smooth CF should have low variance in adjacent frequency differences
+                    cf_diff = torch.abs(pred_cf[:, 1:] - pred_cf[:, :-1])
+                    writer.add_scalar("cf/smoothness_mean_diff", cf_diff.mean().item(), global_step)
+                    writer.add_scalar("cf/smoothness_max_diff", cf_diff.max().item(), global_step)
+                    
+                    # Check for discontinuities (sign of phase wrapping issues)
+                    phase_pred = torch.angle(pred_cf)
+                    phase_diff = torch.abs(phase_pred[:, 1:] - phase_pred[:, :-1])
+                    phase_jumps = (phase_diff > np.pi).float().sum().item()
+                    writer.add_scalar("cf/phase_jumps_count", phase_jumps, global_step)
+                    writer.add_scalar("cf/phase_std", phase_pred.std().item(), global_step)
+                    
+                    # 5. Q-VALUE STATISTICS - Already computed above
+                    writer.add_scalar("losses/q_values_all_mean", all_q_values.mean().item(), global_step)
+                    writer.add_scalar("losses/q_values_all_std", all_q_values.std().item(), global_step)
+                    writer.add_scalar("losses/q_values_all_max", all_q_values.max().item(), global_step)
+                    writer.add_scalar("losses/q_values_all_min", all_q_values.min().item(), global_step)
+                    
+                    # Q-value consistency: should increase over time
+                    q_action_taken = all_q_values[batch_indices, data.actions.flatten()]
+                    writer.add_scalar("losses/q_values_taken_action_mean", q_action_taken.mean().item(), global_step)
+                    
+                    # 6. BELLMAN ERROR - How well does target match prediction
+                    bellman_error = torch.abs(pred_cf - target_cf).mean()
+                    writer.add_scalar("losses/bellman_error", bellman_error.item(), global_step)
+                    
+                    # 7. GRADIENT STATISTICS - Check for exploding/vanishing gradients
+                    total_grad_norm = 0.0
+                    for p in q_network.parameters():
+                        if p.grad is not None:
+                            total_grad_norm += p.grad.data.norm(2).item() ** 2
+                    total_grad_norm = total_grad_norm ** 0.5
+                    writer.add_scalar("debug/gradient_norm", total_grad_norm, global_step)
+                    
+                    # 8. COLLAPSE METHOD VALIDATION - Check if mean extraction is working
+                    # Compare finite difference at ω=0 with Gaussian collapse
                     if zero_idx > 0 and zero_idx < len(q_network.omegas) - 1:
-                        # Central difference: dφ/dω ≈ (φ[i+1] - φ[i-1]) / (ω[i+1] - ω[i-1])
                         dphi_domega = (pred_cf[:, zero_idx+1] - pred_cf[:, zero_idx-1]) / \
                                       (q_network.omegas[zero_idx+1] - q_network.omegas[zero_idx-1])
-                        # φ'(0) = i*E[G], so E[G] = Im[φ'(0)] (no negative sign!)
                         manual_mean = dphi_domega.imag
+                        
+                        q_values_pred = collapse_cf_to_mean(q_network.omegas, pred_cf, max_w=args.collapse_max_w)
+                        
                         writer.add_scalar("debug/q_manual_mean", manual_mean.mean().item(), global_step)
+                        writer.add_scalar("debug/q_collapse_mean", q_values_pred.mean().item(), global_step)
+                        writer.add_scalar("debug/q_method_difference", 
+                                        torch.abs(manual_mean - q_values_pred).mean().item(), global_step)
                     
-                    # Log Q-values for all actions (using current network)
+                    # 9. TARGET NETWORK DIVERGENCE - Check if target is too different
                     with torch.no_grad():
-                        all_cf, all_q_values = q_network.get_all_cf(data.observations)
-                        writer.add_scalar("losses/q_values_all_mean", all_q_values.mean().item(), global_step)
-                        writer.add_scalar("losses/q_values_all_max", all_q_values.max().item(), global_step)
+                        target_cf_all, _ = target_network.get_all_cf(data.observations)
+                        current_cf_all, _ = q_network.get_all_cf(data.observations)
+                        network_divergence = torch.abs(target_cf_all - current_cf_all).mean()
+                        writer.add_scalar("debug/target_network_divergence", network_divergence.item(), global_step)
                     
-                    # CF-specific diagnostics - verify normalization
-                    cf_mag_at_zero_idx = torch.argmin(torch.abs(q_network.omegas)).item()
-                    cf_at_zero = pred_cf[:, cf_mag_at_zero_idx]
-                    writer.add_scalar("cf/magnitude_at_zero", torch.abs(cf_at_zero).mean().item(), global_step)
-                    writer.add_scalar("cf/max_magnitude", torch.abs(pred_cf).max().item(), global_step)
-                    writer.add_scalar("cf/mean_magnitude", torch.abs(pred_cf).mean().item(), global_step)
+                    # 10. INTERPOLATION ERROR - Check if gamma scaling is problematic
+                    with torch.no_grad():
+                        # Compare interpolated CF with direct evaluation at same frequency
+                        interp_error = torch.abs(next_cf_scaled).std()
+                        writer.add_scalar("debug/interpolation_complexity", interp_error.item(), global_step)
                     
-                    # Log target CF properties
-                    target_mag_at_zero = torch.abs(target_cf[:, cf_mag_at_zero_idx]).mean()
+                    # 11. ACTION DISTRIBUTION - Check if agent is exploring
+                    action_counts = torch.bincount(data.actions.flatten(), minlength=envs.single_action_space.n)
+                    action_probs = action_counts.float() / args.batch_size
+                    action_entropy = -torch.sum(action_probs * torch.log(action_probs + 1e-8))
+                    writer.add_scalar("debug/action_entropy", action_entropy.item(), global_step)
+                    
+                    # 12. CF MAGNITUDE DISTRIBUTION - Should stay bounded
+                    cf_magnitudes = torch.abs(pred_cf)
+                    writer.add_scalar("cf/magnitude_mean", cf_magnitudes.mean().item(), global_step)
+                    writer.add_scalar("cf/magnitude_max", cf_magnitudes.max().item(), global_step)
+                    writer.add_scalar("cf/magnitude_min", cf_magnitudes.min().item(), global_step)
+                    writer.add_scalar("cf/magnitude_at_zero", torch.abs(pred_at_zero).mean().item(), global_step)
+                    
+                    # Check if CF is collapsing (all values becoming similar)
+                    cf_variance_across_freq = cf_magnitudes.var(dim=1).mean()
+                    writer.add_scalar("cf/variance_across_frequencies", cf_variance_across_freq.item(), global_step)
+                    
+                    # Target CF properties
+                    target_mag_at_zero = torch.abs(target_at_zero).mean()
                     writer.add_scalar("cf/target_magnitude_at_zero", target_mag_at_zero.item(), global_step)
                     
-                    # Log phase characteristics
-                    phase_pred = torch.angle(pred_cf)
-                    writer.add_scalar("cf/phase_std", phase_pred.std().item(), global_step)
+                    # DIAGNOSTIC SUMMARY: Print key metrics every 10k steps
+                    if global_step % 10000 == 0:
+                        print("\n" + "="*80)
+                        print(f"DIAGNOSTIC SUMMARY @ step {global_step}")
+                        print("="*80)
+                        print(f"Phase wrapping: {max_phase_qvalues:.2f} rad ({max_phase_qvalues/(2*np.pi):.2f} rotations)")
+                        print(f"  Status: {'⚠️ WRAPPED' if max_phase_qvalues > np.pi else '✓ Safe'}")
+                        print(f"φ(0) deviation: pred={torch.abs(pred_at_zero_mag - 1.0).mean():.4f}, "
+                              f"target={torch.abs(target_at_zero_mag - 1.0).mean():.4f}")
+                        print(f"Q-values: mean={all_q_values.mean():.2f}, std={all_q_values.std():.2f}")
+                        print(f"Gradient norm: {total_grad_norm:.4f}")
+                        print(f"Bellman error: {bellman_error:.4f}")
+                        print(f"Phase jumps: {phase_jumps:.0f} / {pred_cf.shape[0] * (pred_cf.shape[1]-1)}")
+                        print("="*80 + "\n")
                     
                     print("SPS:", int(global_step / (time.time() - start_time)))
                     writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
@@ -426,7 +574,13 @@ if __name__ == "__main__":
 
             # update target network
             if global_step % args.target_network_frequency == 0:
-                target_network.load_state_dict(q_network.state_dict())
+                if args.use_polyak:
+                    # Soft update: θ_target = τ*θ + (1-τ)*θ_target
+                    for param, target_param in zip(q_network.parameters(), target_network.parameters()):
+                        target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+                else:
+                    # Hard update (original)
+                    target_network.load_state_dict(q_network.state_dict())
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
