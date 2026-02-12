@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import tyro
+import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 
 from cleanrl_utils.buffers import ReplayBuffer
@@ -142,6 +143,19 @@ class QNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(84, self.n * n_frequencies * 2),
         )
+
+        # EXPERIMENTAL: Initialize last layer to output ~1+0j (Identity CF)
+        # This prevents "random phase wrapping" at initialization which destabilizes bootstrapping
+        with torch.no_grad():
+            last_layer = self.network[-1]
+            last_layer.weight.fill_(0.0) # Zero out weights
+            # Set bias: Real parts = 1.0, Imag parts = 0.0
+            # Output is [n_actions * n_frequencies * 2]
+            # Reshaped later as [n, K, 2] -> last dim is real/imag
+            # So indices 0, 2, 4... are Real. 1, 3, 5... are Imag.
+            bias = torch.zeros_like(last_layer.bias)
+            bias[0::2] = 1.0 # Set every even index (Real) to 1.0
+            last_layer.bias.copy_(bias)
 
     def forward(self, x):
         """
@@ -478,6 +492,28 @@ if __name__ == "__main__":
                     phase_jumps = (phase_diff > np.pi).float().sum().item()
                     writer.add_scalar("cf/phase_jumps_count", phase_jumps, global_step)
                     writer.add_scalar("cf/phase_std", phase_pred.std().item(), global_step)
+                    
+                    # Log phase plot to WandB to visualize the "Sawtooth"
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    # Take first element of batch, first action
+                    # omegas is [K], phase_pred is [batch, K]
+                    # Get omega values (move to cpu)
+                    w_cpu = q_network.omegas.detach().cpu().numpy()
+                    # Get phases for first sample in batch
+                    phi_cpu = phase_pred[0].detach().cpu().numpy()
+                    
+                    ax.plot(w_cpu, phi_cpu, label="Phase (Predicted)")
+                    ax.set_xlabel("Frequency ($\omega$)")
+                    ax.set_ylabel("Phase (radians)")
+                    ax.set_title(f"Phase Wrapping Visualization (Step {global_step})")
+                    ax.set_ylim(-3.5, 3.5) # View range slightly larger than [-pi, pi]
+                    ax.axhline(np.pi, color='r', linestyle='--', alpha=0.3)
+                    ax.axhline(-np.pi, color='r', linestyle='--', alpha=0.3)
+                    ax.grid(True, alpha=0.3)
+                    ax.legend()
+                    
+                    writer.add_figure("debug/phase_plot", fig, global_step)
+                    plt.close(fig)
                     
                     # 5. Q-VALUE STATISTICS - Already computed above
                     writer.add_scalar("losses/q_values_all_mean", all_q_values.mean().item(), global_step)
