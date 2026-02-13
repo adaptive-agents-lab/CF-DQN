@@ -1,0 +1,8 @@
+uv run python cleanrl/cf_dqn.py --seed 1 --env-id LunarLander-v2 --total-timesteps 200000 --exploration-fraction 0.2 --learning-rate 1e-3 --freq-max 2.0 --collapse-max-w 2.0 --n-frequencies 256 --reward-scale 0.1 --gamma 0.98 --track --wandb-project-name CVI-DQN --num-envs 8 --batch-size 256 --cuda
+
+
+uv run python cleanrl/cf_dqn.py --seed 1 --env-id CartPole-v1 --total-timesteps 200000 --exploration-fraction 0.2 --learning-rate 1e-3 --freq-max 2.0 --collapse-max-w 2.0 --n-frequencies 256 --reward-scale 0.1 --gamma 0.98 --track --wandb-project-name CVI-DQN --num-envs 8 --batch-size 256 --cuda
+
+# OPTIMIZED FOR CARTPOLE (Strategy C): Safe Phase Zone
+# Max Return=5.0 (0.01*500), Max Phase=5.0*0.6=3.0 < 3.14 (Safe!)
+uv run python cleanrl/cf_dqn.py --seed 1 --env-id CartPole-v1 --total-timesteps 200000 --exploration-fraction 0.2 --learning-rate 2.5e-3 --freq-max 0.6 --collapse-max-w 0.6 --n-frequencies 256 --reward-scale 0.01 --gamma 0.99 --track --wandb-project-name CVI-DQN --num-envs 16 --batch-size 512 --train-frequency 1 --cuda

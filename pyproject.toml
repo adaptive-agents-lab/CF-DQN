@@ -24,6 +24,7 @@ dependencies = [
     "tenacity>=8.2.2",
     "tyro>=0.5.10",
     "matplotlib>=3.7.5",
+    "swig>=4",
 ]
 
 [project.optional-dependencies]
