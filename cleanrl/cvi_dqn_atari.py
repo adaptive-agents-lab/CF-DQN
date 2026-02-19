@@ -1,12 +1,18 @@
 # CVI-DQN for Atari: Characteristic Value Iteration with CNN feature extractor
 # Distributional RL in the frequency domain using characteristic functions
 #
-# Atari-specific design:
-#   - ClipRewardEnv clips rewards to {-1, 0, 1}
-#   - With γ=0.99, Q_max ≈ 100 → freq_max must be < π/100 ≈ 0.031
-#   - Default freq_max=0.015 gives safety margin (0.015 × 100 = 1.5 < π)
-#   - Same CNN architecture as C51/DQN Atari (Nature DQN)
-#   - Hard φ(0)=1 enforcement + gradient clipping
+# KEY DESIGN: freq_max and collapse_max_w are DECOUPLED.
+#   - freq_max = 1.0  → CF grid spans [-1, 1], giving strong gradient signal
+#   - collapse_max_w = 0.03 → Q extraction uses only |ω| ≤ 0.03 (no phase wrapping)
+#
+# Why this works:
+#   - The loss trains the CF at ALL frequencies (rich signal: loss ≈ 0.3 vs 0.0001)
+#   - Action selection uses ONLY low frequencies where phase doesn't wrap
+#   - make_omega_grid concentrates 50% of bins in inner 10% → ~20 bins at |ω|<0.03
+#   - Polyak averaging keeps target CFs close → high-ω phase differences stay small
+#
+# Phase safety: collapse_max_w × Q_max < π → 0.03 × 105 = 3.15 ≈ π
+#   Safe for Q_max up to ~100 (Atari with clipped rewards + γ=0.99)
 #
 # Compare against: cleanrl/c51_atari.py, cleanrl/dqn_atari.py
 import os
@@ -80,30 +86,31 @@ class Args:
     # CVI-specific arguments
     n_frequencies: int = 128
     """number of frequency grid points (K)"""
-    freq_max: float = 0.015
-    """maximum frequency W — MUST satisfy W * Q_max < π. With clipped rewards & γ=0.99, Q_max≈100, so 0.015*100=1.5 < π"""
-    collapse_max_w: float = 0.015
-    """max |omega| used for collapse_cf_to_mean regression"""
-    sigma_w: float = 0.005
+    freq_max: float = 1.0
+    """maximum frequency W for CF grid — controls gradient signal strength. DECOUPLED from collapse_max_w."""
+    collapse_max_w: float = 0.03
+    """max |omega| for Q-value extraction. MUST satisfy collapse_max_w * Q_max < π. 0.03*100=3.0<π"""
+    sigma_w: float = 0.3
     """Gaussian weighting std for weighted loss types"""
     loss_type: str = "complex_mse"
     """loss function: complex_mse | complex_huber | weighted_mse | weighted_huber"""
     max_grad_norm: float = 10.0
     """gradient clipping norm (0 to disable)"""
 
-    # Target network
+    # Target network — Polyak averaging is essential with decoupled freq_max
+    # Hard copies cause discontinuous jumps in high-ω CFs
     tau: float = 0.005
     """Polyak averaging coefficient"""
-    use_polyak: bool = False
-    """whether to use Polyak averaging instead of hard updates"""
+    use_polyak: bool = True
+    """whether to use Polyak averaging instead of hard updates (recommended for CVI)"""
 
     # Standard DQN arguments (matching C51 Atari defaults)
     buffer_size: int = 1000000
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
-    target_network_frequency: int = 10000
-    """the timesteps it takes to update the target network"""
+    target_network_frequency: int = 1
+    """the timesteps it takes to update the target network (1 = every step for Polyak)"""
     batch_size: int = 32
     """the batch size of sample from the reply memory"""
     start_e: float = 1
@@ -148,7 +155,7 @@ class QNetwork(nn.Module):
     Output reshaped to complex tensor [batch, n_actions, K].
     φ(0) = 1 is HARD-ENFORCED in the forward pass.
     """
-    def __init__(self, env, n_frequencies=128, freq_max=0.015, collapse_max_w=0.015):
+    def __init__(self, env, n_frequencies=128, freq_max=1.0, collapse_max_w=0.03):
         super().__init__()
         self.env = env
         self.n_frequencies = n_frequencies
@@ -240,17 +247,21 @@ if __name__ == "__main__":
     )
 
     # Print operating regime info
-    safe_q_max = np.pi / args.freq_max if args.freq_max > 0 else float('inf')
+    safe_q_max_collapse = np.pi / args.collapse_max_w if args.collapse_max_w > 0 else float('inf')
+    theoretical_q_max = 1 / (1 - args.gamma)
     print(f"\n{'='*60}")
     print(f"CVI-DQN Atari — Operating Regime")
     print(f"{'='*60}")
-    print(f"  env_id       = {args.env_id}")
-    print(f"  loss_type    = {args.loss_type}")
-    print(f"  freq_max     = {args.freq_max}")
-    print(f"  K            = {args.n_frequencies}")
-    print(f"  Safe Q_max   = {safe_q_max:.1f}  (need freq_max * Q_max < pi)")
-    print(f"  collapse_max = {args.collapse_max_w}")
-    print(f"  NOTE: Rewards clipped to {{-1,0,1}} → Q_max ≈ {1/(1-args.gamma):.0f}")
+    print(f"  env_id         = {args.env_id}")
+    print(f"  loss_type      = {args.loss_type}")
+    print(f"  freq_max       = {args.freq_max}  (CF grid range, controls gradient signal)")
+    print(f"  collapse_max_w = {args.collapse_max_w}  (Q extraction, controls phase safety)")
+    print(f"  K              = {args.n_frequencies}")
+    print(f"  Safe Q_max     = {safe_q_max_collapse:.1f}  (need collapse_max_w * Q_max < π)")
+    print(f"  Theoretical Q  = {theoretical_q_max:.0f}  (1/(1-γ) with clipped rewards)")
+    phase_ok = '✓' if args.collapse_max_w * theoretical_q_max < np.pi else '✗ DANGER'
+    print(f"  Phase check    = {args.collapse_max_w} × {theoretical_q_max:.0f} = {args.collapse_max_w * theoretical_q_max:.2f} < π  {phase_ok}")
+    print(f"  Polyak         = {args.use_polyak} (τ={args.tau})")
     print(f"{'='*60}\n")
 
     # Seeding
@@ -381,11 +392,12 @@ if __name__ == "__main__":
                     writer.add_scalar("losses/q_values", all_q_values.mean().item(), global_step)
                     writer.add_scalar("losses/q_values_max", all_q_values.max().item(), global_step)
 
-                    # Phase safety check
+                    # Phase safety check — based on collapse_max_w (not freq_max)
+                    # Only the low-ω bins used for Q extraction need to be phase-safe
                     max_q = abs(all_q_values.max().item())
-                    max_phase = args.freq_max * max_q
-                    writer.add_scalar("debug/max_phase", max_phase, global_step)
-                    writer.add_scalar("debug/phase_safe", float(max_phase < np.pi), global_step)
+                    collapse_phase = args.collapse_max_w * max_q
+                    writer.add_scalar("debug/collapse_phase", collapse_phase, global_step)
+                    writer.add_scalar("debug/phase_safe", float(collapse_phase < np.pi), global_step)
 
                     # φ(0) check
                     phi0_dev = (torch.abs(pred_cf[:, q_network.zero_idx]) - 1.0).abs().mean().item()
@@ -403,7 +415,7 @@ if __name__ == "__main__":
                     if global_step % 10000 == 0:
                         print(f"Step {global_step}: Q_mean={all_q_values.mean():.2f}, "
                               f"Q_max={all_q_values.max():.2f}, loss={loss:.6f}, "
-                              f"grad={total_grad_norm:.4f}, phase={max_phase:.3f}rad, "
+                              f"grad={total_grad_norm:.4f}, collapse_phase={collapse_phase:.3f}rad, "
                               f"SPS={int(global_step / (time.time() - start_time))}")
 
             # Target network update

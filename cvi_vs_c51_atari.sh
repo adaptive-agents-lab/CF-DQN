@@ -69,15 +69,12 @@ echo "GPU:      ${CUDA_VISIBLE_DEVICES}"
 echo "Start:    $(date)"
 echo "=========================================="
 
-# Ensure Atari ROMs are installed (idempotent)
-uv pip install ".[atari]" --quiet
-
 srun uv run python ${SCRIPT} \
     --env-id ${ENV_ID} \
     --seed ${SEED} \
     --total-timesteps 10000000 \
     --wandb-project-name CVI-DQN \
-    --track \
+    --track
 
 echo "=========================================="
 echo "Task ${SLURM_ARRAY_TASK_ID} completed"

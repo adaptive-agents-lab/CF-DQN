@@ -79,24 +79,27 @@ The correct fix is to choose $\omega_{\max}$ based on the **true** Q-value range
 
 ---
 
-### 3. ω_max Chosen from the Q_max Constraint
+### 3. Decoupled freq_max and collapse_max_w (Critical for Large Q-Values)
 
-**Old:** `freq_max=2.0` (hardcoded, no connection to actual Q-values)
+**Old:** `freq_max = collapse_max_w = 0.015` (same value for both, chosen from $\omega \times Q_{\max} < \pi$)
 
-**New:** Explicit constraint documented and printed at startup:
-```
-Safe Q_max = 209.4  (need freq_max * Q_max < pi)
-NOTE: Rewards clipped to {-1,0,1} → Q_max ≈ 100
-```
+**Problem:** At `freq_max=0.015`, the loss is $\mathcal{O}(\omega_{\max}^2) \approx 2 \times 10^{-4}$. Gradients are effectively zero — the network cannot learn. This is the **dual failure mode**: too-large freq_max causes phase wrapping, too-small freq_max causes vanishing gradients.
 
-For each environment, $\omega_{\max}$ is set to $\approx \frac{\pi}{2 Q_{\max}}$ (factor of 2 gives headroom):
+**New:** `freq_max` and `collapse_max_w` are **decoupled**:
+- `freq_max = 1.0` → CF grid spans [-1, 1], loss ≈ 0.3, healthy gradients
+- `collapse_max_w = 0.03` → Q extraction uses only |ω| ≤ 0.03, safe for Q up to π/0.03 ≈ 105
 
-| Environment | $Q_{\max}$ | `freq_max` | `freq_max × Q_max` |
+This works because:
+1. The **loss** trains the CF at **all** frequencies — high-ω bins provide strong gradient signal
+2. **Action selection** uses only **low** frequencies where phase doesn't wrap
+3. `make_omega_grid` concentrates 50% of bins in the inner 10% → ~20 bins at |ω|<0.03
+4. **Polyak averaging** keeps target close to prediction → high-ω phase differences stay small
+
+| Environment | `freq_max` | `collapse_max_w` | Loss magnitude |
 |---|---|---|---|
-| FrozenLake | ~1 | 1.0 | 1.0 < π ✓ |
-| Atari (clipped) | ~100 | 0.015 | 1.5 < π ✓ |
-| CartPole | ~500 | 0.003 | 1.5 < π ✓ |
-| **Old CF-DQN CartPole** | ~500 | **2.0** | **1000 ≫ π ✗** |
+| FrozenLake | 2.0 | 2.0 | ~0.5 ✓ |
+| **Atari (old)** | **0.015** | **0.015** | **~0.0001 ✗** |
+| **Atari (new)** | **1.0** | **0.03** | **~0.3 ✓** |
 
 ---
 
@@ -226,9 +229,11 @@ Unlike the penalty term, the hard enforcement costs nothing and cannot be overri
 | Property | `cf_dqn.py` (old) | `cvi_dqn.py` (new) |
 |---|---|---|
 | φ(0)=1 enforcement | Soft penalty (tunable weight) | Hard clamp in `forward()` |
-| Phase wrapping | $\omega_{\max} \times Q_{\max} = 1000$ | $\omega_{\max} \times Q_{\max} = 1.5$ |
+| freq_max / collapse_max_w | Coupled (same value) | **Decoupled** (1.0 / 0.03 for Atari) |
+| Gradient signal (Atari) | Loss ≈ 0.0001 (dead) | Loss ≈ 0.3 (healthy) |
 | Reward processing | 3 switches + reward_scale | Raw rewards |
+| Target network | Hard copy every 10k | **Polyak averaging** (τ=0.005) |
 | Gradient control | None | Clip at `max_grad_norm=10` |
-| CF-specific hyperparams | 7 | 4 |
+| CF-specific hyperparams | 7 | 5 |
 | dtype safety | Crashes on Discrete obs | `.float()` cast in `forward()` |
 | Validated on | — | 6 progressive tests (all pass) |

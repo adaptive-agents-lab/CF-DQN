@@ -6,7 +6,9 @@
 #   1. Hard φ(0)=1 enforcement in architecture (no penalty term)
 #   2. Gradient clipping for stable updates
 #   3. No reward scaling — full signal preserved
-#   4. ω_max must satisfy: ω_max × Q_max < π for convex loss
+#   4. freq_max and collapse_max_w are DECOUPLED:
+#      - freq_max controls the CF grid range (gradient signal strength)
+#      - collapse_max_w controls Q extraction (must satisfy collapse_max_w × Q_max < π)
 #   5. Supports both unweighted and frequency-weighted losses
 import os
 import random
@@ -73,9 +75,9 @@ class Args:
     n_frequencies: int = 128
     """number of frequency grid points (K)"""
     freq_max: float = 2.0
-    """maximum frequency W (grid spans [-W, W])"""
+    """maximum frequency W for CF grid (gradient signal strength)"""
     collapse_max_w: float = 2.0
-    """max |omega| used for Gaussian collapse method"""
+    """max |omega| for Q extraction. Must satisfy collapse_max_w × Q_max < π"""
     sigma_w: float = 0.3
     """Gaussian weighting std for weighted loss types (only used if loss_type=weighted_*)"""
     loss_type: str = "complex_mse"
