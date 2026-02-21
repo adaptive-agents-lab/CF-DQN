@@ -83,7 +83,7 @@ The correct fix is to choose $\omega_{\max}$ based on the **true** Q-value range
 
 **Old:** `freq_max = collapse_max_w = 0.015` (same value for both, chosen from $\omega \times Q_{\max} < \pi$)
 
-**Problem:** At `freq_max=0.015`, the loss is $\mathcal{O}(\omega_{\max}^2) \approx 2 \times 10^{-4}$. Gradients are effectively zero — the network cannot learn. This is the **dual failure mode**: too-large freq_max causes phase wrapping, too-small freq_max causes vanishing gradients.
+**Problem:** At `freq_max=0.015`, Gradients are effectively zero — the network cannot learn. This is the **dual failure mode**: too-large freq_max causes phase wrapping, too-small freq_max causes vanishing gradients.
 
 **New:** `freq_max` and `collapse_max_w` are **decoupled**:
 - `freq_max = 1.0` → CF grid spans [-1, 1], loss ≈ 0.3, healthy gradients
