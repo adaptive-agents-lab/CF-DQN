@@ -266,12 +266,15 @@ if __name__ == "__main__":
                 with torch.no_grad():
                     # 1. Get target CFs for all actions
                     target_V_complex_all = target_network(data.next_observations)
+
+                    # 2. Double DQN: online network SELECTS the greedy next action,
+                    #    target network EVALUATES it. Decouples selection from evaluation,
+                    #    breaking the positive feedback loop that causes Q overestimation.
+                    online_V_next_all = q_network(data.next_observations)
+                    online_Q_next = gaussian_collapse_q_values(omega_grid, online_V_next_all, w_collapse_adaptive)
+                    next_actions = torch.argmax(online_Q_next, dim=1)  # selected by online network
                     
-                    # 2. Collapse to Q-values to find the greedy next action
-                    target_Q = gaussian_collapse_q_values(omega_grid, target_V_complex_all, w_collapse_adaptive)
-                    next_actions = torch.argmax(target_Q, dim=1)
-                    
-                    # 3. Select the CF of the greedy action
+                    # 3. Select the CF of the greedy action (evaluated by target network)
                     batch_idx = torch.arange(args.batch_size, device=device)
                     target_V_next = target_V_complex_all[batch_idx, next_actions]
                     
