@@ -10,10 +10,10 @@
             "args": [
                 "--env-id", "CartPole-v1",
                 "--total-timesteps", "500000",
-                "--learning-rate", "0.00025",
+                "--learning-rate", "0.0005",
                 "--batch-size", "128",
-                "--target-network-frequency", "500",
-                "--K", "128",
+                "--target-network-frequency", "2000",
+                "--K", "256",
                 "--w", "1.0",
                 "--w-collapse", "0.1",
                 "--track",
