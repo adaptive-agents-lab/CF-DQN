@@ -59,7 +59,7 @@ class Args:
     """the frequency range [-W, W] for the grid construction during training"""
     w_collapse: float = 2.0
     """the maximum frequency range [-W, W] for the collapse when selecting the greedy action"""
-    buffer_size: int = 10000
+    buffer_size: int = 50000
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
@@ -81,8 +81,6 @@ class Args:
     """the frequency of training"""
     max_grad_norm: float = 10.0
     """the maximum gradient norm for clipping"""
-    phase_lin_reg_weight: float = 0.01
-    """weight for the phase-linearity regularization loss inside the collapse window"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -183,11 +181,6 @@ if __name__ == "__main__":
     recent_returns = deque(maxlen=500)
     omega_grid = create_three_density_grid(K=args.K, W=args.w, device=device)
     actual_grid_size = len(omega_grid)
-    # Precompute collapse-window mask and delta-omegas for the phase-linearity regularizer.
-    # These are constant throughout training.
-    low_freq_mask = torch.abs(omega_grid) <= args.w_collapse  # (K_actual,)
-    w_low = omega_grid[low_freq_mask]                          # (M,)
-    delta_omega = w_low[1:] - w_low[:-1]                      # (M-1,) grid spacings inside window
 
     q_network = CF_QNetwork(envs, actual_grid_size=actual_grid_size).to(device)
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate, eps=0.01 / args.batch_size)
@@ -291,28 +284,10 @@ if __name__ == "__main__":
                 current_V = current_V_complex_all[batch_idx, data.actions.flatten()]
                 
                 # Compute Complex MSE Loss in Frequency Domain
-                cf_loss = torch.mean(torch.abs(current_V - y_target) ** 2)
-
-                # Phase-linearity regularization loss.
-                # For a valid CF, phase(ω) = Q·ω → consecutive normalized phase increments
-                # (phase_step / Δω) should be constant across the collapse window.
-                # We penalize their variance so the network has a gradient signal to
-                # maintain the linearity that gaussian_collapse OLS assumes.
-                # Uses single-step phasor ratios: no unwrapping needed, fully differentiable.
-                V_unit = current_V_complex_all / (torch.abs(current_V_complex_all) + 1e-8)  # (B, A, K)
-                V_unit_low = V_unit[..., low_freq_mask]                                      # (B, A, M)
-                phasor_steps = V_unit_low[..., 1:] * V_unit_low[..., :-1].conj()            # (B, A, M-1)
-                phase_steps = torch.angle(phasor_steps)                                      # (B, A, M-1)
-                norm_slopes = phase_steps / (delta_omega + 1e-8)                             # (B, A, M-1)
-                mean_slope = norm_slopes.mean(dim=-1, keepdim=True)                          # (B, A, 1)
-                phase_lin_reg = ((norm_slopes - mean_slope) ** 2).mean()
-
-                loss = cf_loss + args.phase_lin_reg_weight * phase_lin_reg
+                loss = torch.mean(torch.abs(current_V - y_target) ** 2)
 
                 if global_step % 100 == 0:
                     writer.add_scalar("losses/loss", loss.item(), global_step)
-                    writer.add_scalar("losses/cf_loss", cf_loss.item(), global_step)
-                    writer.add_scalar("losses/phase_lin_reg", phase_lin_reg.item(), global_step)
                     current_Q_all = gaussian_collapse_q_values(omega_grid, current_V_complex_all, args.w_collapse)
                     current_Q_taken = current_Q_all[batch_idx, data.actions.flatten()]
                     writer.add_scalar("losses/q_values", current_Q_taken.mean().item(), global_step)
@@ -351,7 +326,8 @@ if __name__ == "__main__":
                     #   window after unwrapping. If > π, unwrap_phase failed inside the window,
                     #   introducing a ±2π cumulative error in the OLS estimate.
                     with torch.no_grad():
-                        w_low_diag = w_low  # reuse precomputed mask/grid
+                        low_freq_mask = torch.abs(omega_grid) <= args.w_collapse
+                        w_low_diag = omega_grid[low_freq_mask]  # (M,)
                         # Per (batch, action) phase in the collapse window
                         phase_all_diag = torch.angle(current_V_complex_all)  # (B, A, K)
                         unwrapped_all_diag = unwrap_phase(phase_all_diag, dim=-1)  # (B, A, K)

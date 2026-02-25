@@ -15,7 +15,7 @@
                 "--target-network-frequency", "2000",
                 "--K", "256",
                 "--w", "1.0",
-                "--w-collapse", "0.1",
+                "--w-collapse", "0.01",
                 "--track",
                 "--wandb-project-name", "Deep-CVI-Experiments",
                 "--end-e", "0.01"
