@@ -77,8 +77,6 @@ class Args:
     """timestep to start learning"""
     train_frequency: int = 10
     """the frequency of training"""
-    cf_reg_weight: float = 0.1
-    """weight for soft CF(0)=1+0j regularization loss"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -117,14 +115,16 @@ class CF_QNetwork(nn.Module):
         out = out.view(out.shape[0], self.action_dim, self.K, 2)
         V_complex = torch.complex(out[..., 0], out[..., 1])
         
-        # Return raw CF — enforce V(0)=1+0j via soft regularization in the loss
-        return V_complex
-    
-    def cf_at_zero(self, x):
-        """Return the raw CF value at omega=0 for regularization."""
-        V_complex = self.forward(x)
+        # Structurally enforce V(0) = 1+0j at center, leave all other frequencies free.
+        # This avoids the hard normalization (which coupled actions via division/subtraction)
+        # and avoids soft regularization (which left the network too unconstrained).
         zero_idx = self.K // 2
-        return V_complex[..., zero_idx]  # shape (batch, action_dim)
+        mask = torch.ones(self.K, device=x.device)
+        mask[zero_idx] = 0.0
+        ones = torch.zeros(self.K, device=x.device, dtype=V_complex.dtype)
+        ones[zero_idx] = 1.0 + 0j
+        V_complex = V_complex * mask + ones  # center pinned, rest untouched
+        return V_complex
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
@@ -274,15 +274,7 @@ if __name__ == "__main__":
                 current_V = current_V_complex_all[batch_idx, data.actions.flatten()]
                 
                 # Compute Complex MSE Loss in Frequency Domain
-                bellman_loss = torch.mean(torch.abs(current_V - y_target) ** 2)
-                
-                # Soft regularization: encourage V(0) = 1+0j for all actions
-                zero_idx = actual_grid_size // 2
-                cf_at_zero = current_V_complex_all[:, :, zero_idx]  # (batch, actions)
-                target_one = torch.ones_like(cf_at_zero)  # 1+0j
-                cf_reg_loss = torch.mean(torch.abs(cf_at_zero - target_one) ** 2)
-                
-                loss = bellman_loss + args.cf_reg_weight * cf_reg_loss
+                loss = torch.mean(torch.abs(current_V - y_target) ** 2)
 
                 if global_step % 100 == 0:
                     writer.add_scalar("losses/loss", loss.item(), global_step)
@@ -295,10 +287,6 @@ if __name__ == "__main__":
                     writer.add_scalar("diagnostics/q_action_gap", q_gap.item(), global_step)
                     total_norm = sum(p.grad.data.norm(2).item() ** 2 for p in q_network.parameters() if p.grad is not None) ** 0.5
                     writer.add_scalar("diagnostics/grad_norm", total_norm, global_step)
-                    writer.add_scalar("diagnostics/bellman_loss", bellman_loss.item(), global_step)
-                    writer.add_scalar("diagnostics/cf_reg_loss", cf_reg_loss.item(), global_step)
-                    writer.add_scalar("diagnostics/cf_mag_at_zero", torch.abs(cf_at_zero).mean().item(), global_step)
-                    writer.add_scalar("diagnostics/cf_phase_at_zero", torch.angle(cf_at_zero).mean().item(), global_step)
 
                 optimizer.zero_grad()
                 loss.backward()
