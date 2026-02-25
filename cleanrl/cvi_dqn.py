@@ -1,6 +1,7 @@
 import os
 import random
 import time
+import math
 from dataclasses import dataclass
 
 import gymnasium as gym
@@ -59,6 +60,10 @@ class Args:
     """the frequency range [-W, W] for the grid construction during training"""
     w_collapse: float = 2.0
     """the maximum frequency range [-W, W] for the collapse when selecting the greedy action"""
+    w_collapse_min: float = 0.002
+    """floor for adaptive w_collapse; ensures at least ~5 grid points on each side of zero"""
+    q_ema_alpha: float = 0.005
+    """EMA decay for tracking |Q| magnitude used to adapt w_collapse adaptively"""
     buffer_size: int = 50000
     """the replay memory buffer size"""
     gamma: float = 0.99
@@ -196,6 +201,11 @@ if __name__ == "__main__":
     )
     start_time = time.time()
     episode_count = 0  # Track total number of completed episodes
+    # Adaptive collapse window: w_collapse_adaptive shrinks as |Q| grows to maintain the
+    # phase budget  Q * w_collapse < π/4,  preventing unwrap_phase ambiguity.
+    # It is upper-bounded by args.w_collapse and lower-bounded by args.w_collapse_min.
+    w_collapse_adaptive: float = args.w_collapse  # starts at the configured maximum
+    q_ema: float = 1.0                        # running EMA of |Q_target| for adaptation
 
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
@@ -208,7 +218,7 @@ if __name__ == "__main__":
             #! CVI action selection
             with torch.no_grad():
                 V_complex_all = q_network(torch.Tensor(obs).to(device))
-                q_values = gaussian_collapse_q_values(omega_grid, V_complex_all, args.w_collapse)
+                q_values = gaussian_collapse_q_values(omega_grid, V_complex_all, w_collapse_adaptive)
                 actions = torch.argmax(q_values, dim=1).cpu().numpy()
             #* C51 action selection for reference
             # actions, pmf = q_network.get_action(torch.Tensor(obs).to(device))
@@ -258,7 +268,7 @@ if __name__ == "__main__":
                     target_V_complex_all = target_network(data.next_observations)
                     
                     # 2. Collapse to Q-values to find the greedy next action
-                    target_Q = gaussian_collapse_q_values(omega_grid, target_V_complex_all, args.w_collapse)
+                    target_Q = gaussian_collapse_q_values(omega_grid, target_V_complex_all, w_collapse_adaptive)
                     next_actions = torch.argmax(target_Q, dim=1)
                     
                     # 3. Select the CF of the greedy action
@@ -288,7 +298,7 @@ if __name__ == "__main__":
 
                 if global_step % 100 == 0:
                     writer.add_scalar("losses/loss", loss.item(), global_step)
-                    current_Q_all = gaussian_collapse_q_values(omega_grid, current_V_complex_all, args.w_collapse)
+                    current_Q_all = gaussian_collapse_q_values(omega_grid, current_V_complex_all, w_collapse_adaptive)
                     current_Q_taken = current_Q_all[batch_idx, data.actions.flatten()]
                     writer.add_scalar("losses/q_values", current_Q_taken.mean().item(), global_step)
                     writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
@@ -300,11 +310,21 @@ if __name__ == "__main__":
                     # Diagnostics: target network Q values + online vs target divergence
                     with torch.no_grad():
                         target_V_diag = target_network(data.observations)
-                        target_Q_diag = gaussian_collapse_q_values(omega_grid, target_V_diag, args.w_collapse)
+                        target_Q_diag = gaussian_collapse_q_values(omega_grid, target_V_diag, w_collapse_adaptive)
                         target_Q_taken_diag = target_Q_diag[batch_idx, data.actions.flatten()]
                         writer.add_scalar("diagnostics/target_q_values", target_Q_taken_diag.mean().item(), global_step)
                         online_target_diff = (current_Q_all - target_Q_diag).abs().mean()
                         writer.add_scalar("diagnostics/q_online_target_diff", online_target_diff.item(), global_step)
+                    # Adaptive collapse window update: shrink w_collapse_adaptive as |Q| grows
+                    # Target: Q * w_collapse_adaptive < π/4  (safely below the π ambiguity cliff)
+                    q_ema = (1 - args.q_ema_alpha) * q_ema + args.q_ema_alpha * abs(target_Q_taken_diag.mean().item())
+                    w_collapse_adaptive = float(np.clip(
+                        math.pi / 4.0 / (q_ema + 1e-6),
+                        args.w_collapse_min,
+                        args.w_collapse,
+                    ))
+                    writer.add_scalar("diagnostics/w_collapse_adaptive", w_collapse_adaptive, global_step)
+                    writer.add_scalar("diagnostics/q_ema", q_ema, global_step)
                     # Diagnostics: CF normalization health (collapse indicator)
                     #   cf_mag_scale: mean raw magnitude at omega=0 BEFORE normalization.
                     #   If this shrinks toward 0, the 1e-8 guard dominates → degenerate normalization.
@@ -326,7 +346,7 @@ if __name__ == "__main__":
                     #   window after unwrapping. If > π, unwrap_phase failed inside the window,
                     #   introducing a ±2π cumulative error in the OLS estimate.
                     with torch.no_grad():
-                        low_freq_mask = torch.abs(omega_grid) <= args.w_collapse
+                        low_freq_mask = torch.abs(omega_grid) <= w_collapse_adaptive
                         w_low_diag = omega_grid[low_freq_mask]  # (M,)
                         # Per (batch, action) phase in the collapse window
                         phase_all_diag = torch.angle(current_V_complex_all)  # (B, A, K)
