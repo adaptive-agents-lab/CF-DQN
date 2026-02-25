@@ -63,8 +63,8 @@ class Args:
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
-    target_network_frequency: int = 500
-    """the timesteps it takes to update the target network"""
+    tau: float = 0.005
+    """the soft update coefficient for Polyak target network updates"""
     batch_size: int = 128
     """the batch size of sample from the reply memory"""
     start_e: float = 1
@@ -77,6 +77,8 @@ class Args:
     """timestep to start learning"""
     train_frequency: int = 10
     """the frequency of training"""
+    max_grad_norm: float = 10.0
+    """the maximum gradient norm for clipping"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -115,16 +117,22 @@ class CF_QNetwork(nn.Module):
         out = out.view(out.shape[0], self.action_dim, self.K, 2)
         V_complex = torch.complex(out[..., 0], out[..., 1])
         
-        # Structurally enforce V(0) = 1+0j at center, leave all other frequencies free.
-        # This avoids the hard normalization (which coupled actions via division/subtraction)
-        # and avoids soft regularization (which left the network too unconstrained).
+        # Hard normalization to ensure V(0) = 1+0j is always respected.
+        # This provides the inductive bias that outputs are valid CFs,
+        # which is critical for gaussian_collapse phase-slope extraction.
+        mag_raw = torch.abs(V_complex)
+        phase_raw = torch.angle(V_complex)
+        
         zero_idx = self.K // 2
-        mask = torch.ones(self.K, device=x.device)
-        mask[zero_idx] = 0.0
-        ones = torch.zeros(self.K, device=x.device, dtype=V_complex.dtype)
-        ones[zero_idx] = 1.0 + 0j
-        V_complex = V_complex * mask + ones  # center pinned, rest untouched
-        return V_complex
+        
+        mag_at_zero = mag_raw[..., zero_idx : zero_idx + 1]
+        phase_at_zero = phase_raw[..., zero_idx : zero_idx + 1]
+        
+        mag_norm = mag_raw / (mag_at_zero + 1e-8) 
+        phase_norm = phase_raw - phase_at_zero
+        
+        V_valid = mag_norm * torch.complex(torch.cos(phase_norm), torch.sin(phase_norm))
+        return V_valid
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
@@ -290,11 +298,12 @@ if __name__ == "__main__":
 
                 optimizer.zero_grad()
                 loss.backward()
+                nn.utils.clip_grad_norm_(q_network.parameters(), args.max_grad_norm)
                 optimizer.step()
                 
-            # update target network
-            if global_step % args.target_network_frequency == 0:
-                target_network.load_state_dict(q_network.state_dict())
+            # Soft Polyak target network update (every training step)
+            for target_param, param in zip(target_network.parameters(), q_network.parameters()):
+                target_param.data.copy_(args.tau * param.data + (1.0 - args.tau) * target_param.data)
                 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
