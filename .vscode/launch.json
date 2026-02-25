@@ -18,7 +18,11 @@
                 "--w-collapse", "0.01",
                 "--track",
                 "--wandb-project-name", "Deep-CVI-Experiments",
-                "--end-e", "0.01"
+                "--end-e", "0.0",
+                "--seed", "2",
+                "--exploration-fraction", "0.3",
+                "--buffer-size", "10000",
+
             ],
             "justMyCode": true
         }

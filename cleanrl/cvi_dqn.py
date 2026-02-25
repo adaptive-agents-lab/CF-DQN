@@ -64,7 +64,7 @@ class Args:
     """floor for adaptive w_collapse; ensures at least ~5 grid points on each side of zero"""
     q_ema_alpha: float = 0.005
     """EMA decay for tracking |Q| magnitude used to adapt w_collapse adaptively"""
-    buffer_size: int = 50000
+    buffer_size: int = 10000
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
