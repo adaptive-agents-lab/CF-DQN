@@ -27,7 +27,8 @@
 ################################################################################
 
 # ===== EDIT THIS LINE WITH YOUR SWEEP ID =====
-SWEEP_ID="${SWEEP_ID:-YOUR_ENTITY/Deep-CVI-Experiments/538efz7i}"
+SWEEP_ID="${SWEEP_ID:-fatty_data/Deep-CVI-Experiments/538efz7i}"
+
 # ==============================================
 
 mkdir -p slurm/logs/sym-fd-sweep-cartpole/
