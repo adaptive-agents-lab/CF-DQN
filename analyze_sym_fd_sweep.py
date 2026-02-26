@@ -60,7 +60,7 @@ agg = df.groupby(group_cols).agg(
 ).reset_index().sort_values("avg_return", ascending=False)
 
 # ── Display results ───────────────────────────────────────────────────────────
-pd.set_option("display.float_format", "{:.1f}".format)
+pd.set_option("display.float_format", "{:.4g}".format)
 pd.set_option("display.max_columns", 20)
 pd.set_option("display.width", 140)
 
