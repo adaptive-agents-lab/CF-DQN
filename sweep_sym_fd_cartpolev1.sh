@@ -27,7 +27,7 @@
 ################################################################################
 
 # ===== EDIT THIS LINE WITH YOUR SWEEP ID =====
-SWEEP_ID="${SWEEP_ID:-fatty_data/Deep-CVI-Experiments/538efz7i}"
+SWEEP_ID="${SWEEP_ID:-fatty_data/CF-DQN-cleanrl/538efz7i}"
 
 # ==============================================
 
