@@ -209,7 +209,7 @@ if __name__ == "__main__":
             #! CVI action selection
             with torch.no_grad():
                 V_complex_all = q_network(torch.Tensor(obs).to(device))
-                q_values = gaussian_collapse_q_values(omega_grid, V_complex_all, n_collapse_pairs=args.n_collapse_pairs)
+                q_values = gaussian_collapse_q_values(omega_grid, V_complex_all, n_pairs=args.n_collapse_pairs)
                 actions = torch.argmax(q_values, dim=1).cpu().numpy()
             
             #* C51 action selection for reference
@@ -263,7 +263,7 @@ if __name__ == "__main__":
                     #    target network EVALUATES it. Decouples selection from evaluation,
                     #    breaking the positive feedback loop that causes Q overestimation.
                     online_V_next_all = q_network(data.next_observations)
-                    online_Q_next = gaussian_collapse_q_values(omega_grid, online_V_next_all, n_collapse_pairs=args.n_collapse_pairs)
+                    online_Q_next = gaussian_collapse_q_values(omega_grid, online_V_next_all, n_pairs=args.n_collapse_pairs)
                     next_actions = torch.argmax(online_Q_next, dim=1)  # selected by online network
                     
                     # 3. Select the CF of the greedy action (evaluated by target network)
@@ -322,7 +322,7 @@ if __name__ == "__main__":
                     writer.add_scalar("losses/base_loss", base_loss.item(), global_step)
                     writer.add_scalar("losses/validity_loss", validity_loss.item(), global_step)
                     
-                    current_Q_all = gaussian_collapse_q_values(omega_grid, current_V_complex_all, n_collapse_pairs=args.n_collapse_pairs)
+                    current_Q_all = gaussian_collapse_q_values(omega_grid, current_V_complex_all, n_pairs=args.n_collapse_pairs)
                     current_Q_taken = current_Q_all[batch_idx, data.actions.flatten()]
                     
                     writer.add_scalar("losses/q_values", current_Q_taken.mean().item(), global_step)
@@ -330,7 +330,7 @@ if __name__ == "__main__":
                     
                     with torch.no_grad():
                         target_V_diag = target_network(data.observations)
-                        target_Q_diag = gaussian_collapse_q_values(omega_grid, target_V_diag, n_collapse_pairs=args.n_collapse_pairs)
+                        target_Q_diag = gaussian_collapse_q_values(omega_grid, target_V_diag, n_pairs=args.n_collapse_pairs)
                         target_Q_taken_diag = target_Q_diag[batch_idx, data.actions.flatten()]
                         writer.add_scalar("diagnostics/target_q_values", target_Q_taken_diag.mean().item(), global_step)
                         
