@@ -179,8 +179,8 @@ if __name__ == "__main__":
     
     #! Init CF-Q-Network and Grid
     recent_returns = deque(maxlen=500)
-    omega_grid = create_uniform_grid(K=args.K, W=args.w, device=device)
-    #omega_grid = create_three_density_grid(K=args.K, W=args.w, device=device)
+    #omega_grid = create_uniform_grid(K=args.K, W=args.w, device=device)
+    omega_grid = create_three_density_grid(K=args.K, W=args.w, device=device)
     actual_grid_size = len(omega_grid)
 
     q_network = CF_QNetwork(envs, actual_grid_size=actual_grid_size).to(device)
@@ -209,7 +209,7 @@ if __name__ == "__main__":
             #! CVI action selection
             with torch.no_grad():
                 V_complex_all = q_network(torch.Tensor(obs).to(device))
-                q_values = ifft_collapse_q_values(omega_grid, V_complex_all)
+                q_values = gaussian_collapse_q_values(omega_grid, V_complex_all, n_collapse_pairs=args.n_collapse_pairs)
                 actions = torch.argmax(q_values, dim=1).cpu().numpy()
             
             #* C51 action selection for reference
@@ -263,7 +263,7 @@ if __name__ == "__main__":
                     #    target network EVALUATES it. Decouples selection from evaluation,
                     #    breaking the positive feedback loop that causes Q overestimation.
                     online_V_next_all = q_network(data.next_observations)
-                    online_Q_next = ifft_collapse_q_values(omega_grid, online_V_next_all)
+                    online_Q_next = gaussian_collapse_q_values(omega_grid, online_V_next_all, n_collapse_pairs=args.n_collapse_pairs)
                     next_actions = torch.argmax(online_Q_next, dim=1)  # selected by online network
                     
                     # 3. Select the CF of the greedy action (evaluated by target network)
@@ -274,29 +274,32 @@ if __name__ == "__main__":
                     gammas = args.gamma * (1 - data.dones)
                     
                     #! 5. Interpolate at scaled frequencies
-                    interp_V = polar_interpolation(omega_grid, target_V_next, gammas)
-                    
+                    #!interp_V = polar_interpolation(omega_grid, target_V_next, gammas)
                     #! NEW: Clean the interpolated target to destroy negative-tail noise
-                    clean_interp_V = get_cleaned_target_cf(omega_grid, interp_V)
-                    
+                    #!clean_interp_V = get_cleaned_target_cf(omega_grid, interp_V)
                     #! 6. Apply reward rotation: e^{i * w * R}
-                    reward_rotation = torch.exp(1j * omega_grid.view(1, -1) * data.rewards)
-                    
+                    #!reward_rotation = torch.exp(1j * omega_grid.view(1, -1) * data.rewards)
                     #! 7. Final Bellman Target
-                    y_target = reward_rotation * clean_interp_V
+                    #!y_target = reward_rotation * clean_interp_V
                     
-                    # # 5. Interpolate at scaled frequencies
-                    # interp_V = polar_interpolation(omega_grid, target_V_next, gammas)
-                    # # 6. Apply reward rotation: e^{i * w * R}
-                    # reward_rotation = torch.exp(1j * omega_grid.view(1, -1) * data.rewards)
-                    # # 7. Final Bellman Target
-                    # y_target = reward_rotation * interp_V 
+                    # 5. Interpolate at scaled frequencies
+                    interp_V = polar_interpolation(omega_grid, target_V_next, gammas)
+                    # 6. Apply reward rotation: e^{i * w * R}
+                    reward_rotation = torch.exp(1j * omega_grid.view(1, -1) * data.rewards)
+                    # 7. Final Bellman Target
+                    y_target = reward_rotation * interp_V 
 
                 current_V_complex_all = q_network(data.observations)
                 current_V = current_V_complex_all[batch_idx, data.actions.flatten()]
                 
-                # Because we use IFFT, the entire frequency spectrum matters equally.
-                base_loss = torch.mean(torch.abs(current_V - y_target) ** 2)
+                # Weighted MSE Loss in Frequency Domain with Gaussian Weights
+                sigma = 0.5 
+                weights = torch.exp(-(omega_grid ** 2) / (2 * sigma ** 2))
+                weights = weights / weights.sum()
+                unweighted_mse = torch.abs(current_V - y_target) ** 2
+                
+                weighted_mse = torch.sum(weights.view(1, -1) * unweighted_mse, dim=1)
+                base_loss = torch.mean(weighted_mse)
                 
                 # 2. Soft Validity Penalty (V(0) = 1)
                 raw_out = q_network.cf_head(q_network.network(data.observations))
@@ -319,30 +322,15 @@ if __name__ == "__main__":
                     writer.add_scalar("losses/base_loss", base_loss.item(), global_step)
                     writer.add_scalar("losses/validity_loss", validity_loss.item(), global_step)
                     
-                    # Use the new IFFT collapse function
-                    current_Q_all = ifft_collapse_q_values(omega_grid, current_V_complex_all)
+                    current_Q_all = gaussian_collapse_q_values(omega_grid, current_V_complex_all, n_collapse_pairs=args.n_collapse_pairs)
                     current_Q_taken = current_Q_all[batch_idx, data.actions.flatten()]
                     
                     writer.add_scalar("losses/q_values", current_Q_taken.mean().item(), global_step)
                     writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
                     
-                    # Diagnostics
-                    q_gap = (current_Q_all.max(dim=1).values - current_Q_all.min(dim=1).values).mean()
-                    writer.add_scalar("diagnostics/q_action_gap", q_gap.item(), global_step)
-                    total_norm = sum(p.grad.data.norm(2).item() ** 2 for p in q_network.parameters() if p.grad is not None) ** 0.5
-                    writer.add_scalar("diagnostics/grad_norm", total_norm, global_step)
-                    
-                    q_masked, q_unmasked, pdf_unmasked = ifft_collapse_q_values(
-                        omega_grid, current_V_complex_all, return_diagnostics=True
-                    )
-                    
-                    q_distortion_gap = (q_masked - q_unmasked).abs().mean()
-                    writer.add_scalar("diagnostics/q_distortion_gap", q_distortion_gap.item(), global_step)
-                    writer.add_scalar("losses/q_values_unmasked", q_unmasked[batch_idx, data.actions.flatten()].mean().item(), global_step)
-                    
                     with torch.no_grad():
                         target_V_diag = target_network(data.observations)
-                        target_Q_diag = ifft_collapse_q_values(omega_grid, target_V_diag)
+                        target_Q_diag = gaussian_collapse_q_values(omega_grid, target_V_diag, n_collapse_pairs=args.n_collapse_pairs)
                         target_Q_taken_diag = target_Q_diag[batch_idx, data.actions.flatten()]
                         writer.add_scalar("diagnostics/target_q_values", target_Q_taken_diag.mean().item(), global_step)
                         
