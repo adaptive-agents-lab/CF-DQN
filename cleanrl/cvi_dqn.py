@@ -16,7 +16,7 @@ import numpy as np
 
 from cleanrl_utils.buffers import ReplayBuffer
 
-from cleanrl.cvi_utils import create_three_density_grid, polar_interpolation, gaussian_collapse_q_values, create_uniform_grid, ifft_collapse_q_values
+from cleanrl.cvi_utils import create_three_density_grid, polar_interpolation, gaussian_collapse_q_values, create_uniform_grid, ifft_collapse_q_values, get_cleaned_target_cf
 
 
 @dataclass
