@@ -38,6 +38,8 @@ def ifft_collapse_q_values(omega_grid, V_complex):
     
     # Clamp negative numerical artifacts and normalize to a valid probability distribution
     pdf = torch.clamp(pdf_shifted, min=0.0)
+    valid_mask = (x_grid >= 0.0) & (x_grid <= 100.0)
+    pdf = pdf * valid_mask.float()  # Zero out invalid regions
     pdf = pdf / (pdf.sum(dim=-1, keepdim=True) + 1e-8)
     
     # Compute Expected Value: sum(x * P(x))
