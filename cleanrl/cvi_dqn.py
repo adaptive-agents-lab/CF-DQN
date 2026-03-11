@@ -322,6 +322,14 @@ if __name__ == "__main__":
                     total_norm = sum(p.grad.data.norm(2).item() ** 2 for p in q_network.parameters() if p.grad is not None) ** 0.5
                     writer.add_scalar("diagnostics/grad_norm", total_norm, global_step)
                     
+                    q_masked, q_unmasked, pdf_unmasked = ifft_collapse_q_values(
+                        omega_grid, current_V_complex_all, return_diagnostics=True
+                    )
+                    
+                    q_distortion_gap = (q_masked - q_unmasked).abs().mean()
+                    writer.add_scalar("diagnostics/q_distortion_gap", q_distortion_gap.item(), global_step)
+                    writer.add_scalar("losses/q_values_unmasked", q_unmasked[batch_idx, data.actions.flatten()].mean().item(), global_step)
+                    
                     with torch.no_grad():
                         target_V_diag = target_network(data.observations)
                         target_Q_diag = ifft_collapse_q_values(omega_grid, target_V_diag)

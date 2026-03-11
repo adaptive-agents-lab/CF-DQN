@@ -13,7 +13,7 @@ def create_uniform_grid(K: int, W: float, device="cpu"):
     grid = torch.linspace(-W, W - dw, K, device=device)
     return grid
 
-def ifft_collapse_q_values(omega_grid, V_complex):
+def ifft_collapse_q_values(omega_grid, V_complex, return_diagnostics=False):
     """
     Extracts Q-values by transforming the CF back into a Probability Density Function (PDF)
     using the Inverse Fast Fourier Transform, then computing the expected value E[x].
@@ -36,16 +36,20 @@ def ifft_collapse_q_values(omega_grid, V_complex):
     # Shift the spatial zero back to the center and take the real component
     pdf_shifted = torch.fft.fftshift(pdf_complex.real, dim=-1)
     
-    # Clamp negative numerical artifacts and normalize to a valid probability distribution
-    pdf = torch.clamp(pdf_shifted, min=0.0)
+    # 1. Unmasked Q-value (What the network ACTUALLY predicts)
+    pdf_unmasked = torch.clamp(pdf_shifted, min=0.0)
+    pdf_unmasked = pdf_unmasked / (pdf_unmasked.sum(dim=-1, keepdim=True) + 1e-8)
+    q_unmasked = torch.sum(pdf_unmasked * x_grid, dim=-1)
+    
+    # 2. Masked Q-value (What the agent uses to act)
     valid_mask = (x_grid >= 0.0) & (x_grid <= 100.0)
-    pdf = pdf * valid_mask.float()  # Zero out invalid regions
-    pdf = pdf / (pdf.sum(dim=-1, keepdim=True) + 1e-8)
+    pdf_masked = pdf_unmasked * valid_mask.float()
+    pdf_masked = pdf_masked / (pdf_masked.sum(dim=-1, keepdim=True) + 1e-8)
+    q_masked = torch.sum(pdf_masked * x_grid, dim=-1)
     
-    # Compute Expected Value: sum(x * P(x))
-    q_values = torch.sum(pdf * x_grid, dim=-1)
-    
-    return q_values
+    if return_diagnostics:
+        return q_masked, q_unmasked, pdf_unmasked
+    return q_masked
 
 def create_three_density_grid(K: int, W: float, device="cpu"):
     """
