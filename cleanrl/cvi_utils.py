@@ -2,7 +2,48 @@ import os
 import torch
 import math
 
+def create_uniform_grid(K: int, W: float, device="cpu"):
+    """
+    Constructs a uniform frequency grid required for Fast Fourier Transforms.
+    Generates K points perfectly symmetric around 0, spanning [-W, W - dw].
+    """
+    assert K % 2 == 0, "K must be even for FFT symmetry."
+    dw = 2.0 * W / K
+    # Standard FFT grid: [-W, W)
+    grid = torch.linspace(-W, W - dw, K, device=device)
+    return grid
 
+def ifft_collapse_q_values(omega_grid, V_complex):
+    """
+    Extracts Q-values by transforming the CF back into a Probability Density Function (PDF)
+    using the Inverse Fast Fourier Transform, then computing the expected value E[x].
+    """
+    K = V_complex.shape[-1]
+    W = torch.abs(omega_grid[0]).item()
+    
+    # Mathematical relationship between frequency resolution and spatial resolution
+    dx = math.pi / W
+    
+    # Construct the corresponding spatial grid x: [-K/2 * dx, (K/2 - 1) * dx]
+    x_grid = torch.linspace(- (K // 2) * dx, (K // 2 - 1) * dx, K, device=V_complex.device)
+    
+    # Shift frequency 0 to index 0 for standard PyTorch IFFT
+    V_shifted = torch.fft.ifftshift(V_complex, dim=-1)
+    
+    # Perform Inverse FFT to get the unnormalized PDF
+    pdf_complex = torch.fft.ifft(V_shifted, dim=-1)
+    
+    # Shift the spatial zero back to the center and take the real component
+    pdf_shifted = torch.fft.fftshift(pdf_complex.real, dim=-1)
+    
+    # Clamp negative numerical artifacts and normalize to a valid probability distribution
+    pdf = torch.clamp(pdf_shifted, min=0.0)
+    pdf = pdf / (pdf.sum(dim=-1, keepdim=True) + 1e-8)
+    
+    # Compute Expected Value: sum(x * P(x))
+    q_values = torch.sum(pdf * x_grid, dim=-1)
+    
+    return q_values
 
 def create_three_density_grid(K: int, W: float, device="cpu"):
     """
@@ -27,19 +68,6 @@ def create_three_density_grid(K: int, W: float, device="cpu"):
     inner_bound = 0.1 * W
     mid_bound = 0.5 * W 
     
-    # Generate the positive half of the grid
-    # ω_min must satisfy: ω_min < π / (2 × Q_max)
-    # where Q_max ≈ r_max / (1 − γ) for a given environment.
-    #
-    # We set ω_min = 1e-3 × W, scaling with the grid range so the ratio
-    # ω_min / W stays constant regardless of W.  This gives:
-    #   safe Q_max = π / (2 × 1e-3 × W)
-    #   W=1.0  → safe to Q ≈ 1570   (CartPole, LunarLander, Atari-clipped: Q* ≈ 100)
-    #   W=5.0  → safe to Q ≈ 314    (still covers all clipped-reward envs at γ=0.99)
-    #   W=0.1  → safe to Q ≈ 15700  (headroom for large-reward envs)
-    #
-    # The ONLY unsafe case is unclipped Atari (game-native scores, Q* up to ~80000).
-    # For that, reduce W or switch to reward clipping — both are standard practice.
     omega_min = 1e-3 * W
     inner = torch.linspace(omega_min, inner_bound, n_inner, device=device)
     mid = torch.linspace(inner_bound + 1e-4, mid_bound, n_mid, device=device)
@@ -143,7 +171,10 @@ def gaussian_collapse_q_values(omega_grid, V_complex, n_pairs=5):
     neg_idx = zero_idx - k                   # −ω_1 … −ω_N
 
     omega_pos = omega_grid[pos_idx]          # (n_pairs,)  all positive
-    phase = torch.angle(V_complex)           # (…, K+1)
+    phase = torch.angle(V_complex)          # (…, K+1)
+    
+    #! Unrwap phase
+    phase = unwrap_phase(phase, dim=-1)       # (…, K+1)
 
     phase_pos = phase[..., pos_idx]          # (…, n_pairs)
     phase_neg = phase[..., neg_idx]          # (…, n_pairs)

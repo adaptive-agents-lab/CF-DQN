@@ -17,7 +17,7 @@
                 "--track",
                 "--wandb-project-name", "Deep-CVI-Experiments",
                 "--end-e", "0.0",
-                "--seed", "100",
+                "--seed", "12",
                 "--exploration-fraction", "0.3",
                 "--buffer-size", "50000", 
                 "--n-collapse-pairs", "5",

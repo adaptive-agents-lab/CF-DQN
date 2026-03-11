@@ -16,7 +16,7 @@ import numpy as np
 
 from cleanrl_utils.buffers import ReplayBuffer
 
-from cleanrl.cvi_utils import create_three_density_grid, polar_interpolation, gaussian_collapse_q_values
+from cleanrl.cvi_utils import create_three_density_grid, polar_interpolation, gaussian_collapse_q_values, create_uniform_grid, ifft_collapse_q_values
 
 
 @dataclass
@@ -58,9 +58,7 @@ class Args:
     w: float = 5.0
     """the frequency range [-W, W] for the grid construction during training"""
     n_collapse_pairs: int = 5
-    """number of innermost symmetric frequency pairs used to collapse CF → Q-value;
-    with create_three_density_grid(K=256, W=1.0) this covers ω ≈ [1e-3, 6e-3],
-    safe to Q ≈ π/(2·1e-3) ≈ 1570"""
+    """number of innermost symmetric frequency pairs used to collapse CF → Q-value; a smaller number means more conservative collapse with lower variance but higher bias"""
     buffer_size: int = 10000
     """the replay memory buffer size"""
     gamma: float = 0.99
@@ -181,7 +179,8 @@ if __name__ == "__main__":
     
     #! Init CF-Q-Network and Grid
     recent_returns = deque(maxlen=500)
-    omega_grid = create_three_density_grid(K=args.K, W=args.w, device=device)
+    omega_grid = create_uniform_grid(K=args.K, W=args.w, device=device)
+    #omega_grid = create_three_density_grid(K=args.K, W=args.w, device=device)
     actual_grid_size = len(omega_grid)
 
     q_network = CF_QNetwork(envs, actual_grid_size=actual_grid_size).to(device)
@@ -210,8 +209,9 @@ if __name__ == "__main__":
             #! CVI action selection
             with torch.no_grad():
                 V_complex_all = q_network(torch.Tensor(obs).to(device))
-                q_values = gaussian_collapse_q_values(omega_grid, V_complex_all, args.n_collapse_pairs)
+                q_values = ifft_collapse_q_values(omega_grid, V_complex_all)
                 actions = torch.argmax(q_values, dim=1).cpu().numpy()
+            
             #* C51 action selection for reference
             # actions, pmf = q_network.get_action(torch.Tensor(obs).to(device))
             # actions = actions.cpu().numpy()
@@ -263,7 +263,7 @@ if __name__ == "__main__":
                     #    target network EVALUATES it. Decouples selection from evaluation,
                     #    breaking the positive feedback loop that causes Q overestimation.
                     online_V_next_all = q_network(data.next_observations)
-                    online_Q_next = gaussian_collapse_q_values(omega_grid, online_V_next_all, args.n_collapse_pairs)
+                    online_Q_next = ifft_collapse_q_values(omega_grid, online_V_next_all)
                     next_actions = torch.argmax(online_Q_next, dim=1)  # selected by online network
                     
                     # 3. Select the CF of the greedy action (evaluated by target network)
@@ -282,65 +282,60 @@ if __name__ == "__main__":
                     # 7. Final Bellman Target
                     y_target = reward_rotation * interp_V 
 
-                # --- Online Network Update ---
                 current_V_complex_all = q_network(data.observations)
-                
-                # Select CF for the actions actually taken
                 current_V = current_V_complex_all[batch_idx, data.actions.flatten()]
                 
-                # Compute Complex MSE Loss in Frequency Domain
-                loss = torch.mean(torch.abs(current_V - y_target) ** 2)
+                # Because we use IFFT, the entire frequency spectrum matters equally.
+                base_loss = torch.mean(torch.abs(current_V - y_target) ** 2)
+                
+                # 2. Soft Validity Penalty (V(0) = 1)
+                raw_out = q_network.cf_head(q_network.network(data.observations))
+                raw_out = raw_out.view(raw_out.shape[0], q_network.action_dim, q_network.K, 2)
+                raw_complex = torch.complex(raw_out[..., 0], raw_out[..., 1])
+                
+                # Zero frequency is exactly at K // 2 in the uniform grid
+                zero_idx = q_network.K // 2
+                raw_at_zero = raw_complex[batch_idx, data.actions.flatten(), zero_idx]
+
+                validity_loss = torch.mean(torch.abs(raw_at_zero - 1.0) ** 2)
+                lambda_validity = 10.0
+                loss = base_loss + lambda_validity * validity_loss
+                
+                #! Compute Complex MSE Loss in Frequency Domain
+                #loss = torch.mean(torch.abs(current_V - y_target) ** 2)
 
                 if global_step % 100 == 0:
                     writer.add_scalar("losses/loss", loss.item(), global_step)
-                    current_Q_all = gaussian_collapse_q_values(omega_grid, current_V_complex_all, args.n_collapse_pairs)
+                    writer.add_scalar("losses/base_loss", base_loss.item(), global_step)
+                    writer.add_scalar("losses/validity_loss", validity_loss.item(), global_step)
+                    
+                    # Use the new IFFT collapse function
+                    current_Q_all = ifft_collapse_q_values(omega_grid, current_V_complex_all)
                     current_Q_taken = current_Q_all[batch_idx, data.actions.flatten()]
+                    
                     writer.add_scalar("losses/q_values", current_Q_taken.mean().item(), global_step)
                     writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
-                    # Diagnostics: action gap + grad norm
+                    
+                    # Diagnostics
                     q_gap = (current_Q_all.max(dim=1).values - current_Q_all.min(dim=1).values).mean()
                     writer.add_scalar("diagnostics/q_action_gap", q_gap.item(), global_step)
                     total_norm = sum(p.grad.data.norm(2).item() ** 2 for p in q_network.parameters() if p.grad is not None) ** 0.5
                     writer.add_scalar("diagnostics/grad_norm", total_norm, global_step)
-                    # Diagnostics: target network Q values + online vs target divergence
+                    
                     with torch.no_grad():
                         target_V_diag = target_network(data.observations)
-                        target_Q_diag = gaussian_collapse_q_values(omega_grid, target_V_diag, args.n_collapse_pairs)
+                        target_Q_diag = ifft_collapse_q_values(omega_grid, target_V_diag)
                         target_Q_taken_diag = target_Q_diag[batch_idx, data.actions.flatten()]
                         writer.add_scalar("diagnostics/target_q_values", target_Q_taken_diag.mean().item(), global_step)
+                        
                         online_target_diff = (current_Q_all - target_Q_diag).abs().mean()
                         writer.add_scalar("diagnostics/q_online_target_diff", online_target_diff.item(), global_step)
-                    # Diagnostics: CF normalization health (collapse indicator)
-                    #   cf_mag_scale: mean raw magnitude at omega=0 BEFORE normalization.
-                    #   If this shrinks toward 0, the 1e-8 guard dominates → degenerate normalization.
-                    with torch.no_grad():
-                        raw_out = q_network.cf_head(q_network.network(data.observations))
-                        raw_out = raw_out.view(raw_out.shape[0], q_network.action_dim, q_network.K, 2)
-                        raw_complex = torch.complex(raw_out[..., 0], raw_out[..., 1])
-                        zero_idx_diag = q_network.K // 2
-                        mag_at_zero_diag = torch.abs(raw_complex[..., zero_idx_diag]).mean()
-                        phase_at_zero_diag = torch.angle(raw_complex[..., zero_idx_diag]).abs().mean()
+                        
+                        mag_at_zero_diag = torch.abs(raw_complex[..., zero_idx]).mean()
+                        phase_at_zero_diag = torch.angle(raw_complex[..., zero_idx]).abs().mean()
                         writer.add_scalar("diagnostics/cf_mag_scale", mag_at_zero_diag.item(), global_step)
                         writer.add_scalar("diagnostics/cf_phase_at_zero", phase_at_zero_diag.item(), global_step)
-                    # Diagnostics: symmetric FD collapse health
-                    #   q_slope_spread: std of per-pair Q estimates across the N pairs.
-                    #     A low value means all pairs agree → collapse is reliable.
-                    #     A growing value means higher-frequency pairs are deviating (Q too large).
-                    #   cf_phase_max_pair: raw |phase| at the outermost pair (+ω_N).
-                    #     If this approaches π, the phase is at risk of wrapping → increase K or
-                    #     decrease n_collapse_pairs.
-                    with torch.no_grad():
-                        zero_idx_diag = len(omega_grid) // 2
-                        k_diag = torch.arange(1, args.n_collapse_pairs + 1, device=device)
-                        pos_idx_diag = zero_idx_diag + k_diag
-                        neg_idx_diag = zero_idx_diag - k_diag
-                        omega_pos_diag = omega_grid[pos_idx_diag]            # (N,)
-                        phase_all_diag = torch.angle(current_V_complex_all)  # (B, A, K+1)
-                        phase_pos_diag = phase_all_diag[..., pos_idx_diag]   # (B, A, N)
-                        phase_neg_diag = phase_all_diag[..., neg_idx_diag]   # (B, A, N)
-                        slopes_diag = (phase_pos_diag - phase_neg_diag) / (2.0 * omega_pos_diag)  # (B, A, N)
-                        writer.add_scalar("diagnostics/q_slope_spread", slopes_diag.std(dim=-1).mean().item(), global_step)
-                        writer.add_scalar("diagnostics/cf_phase_max_pair", phase_pos_diag[..., -1].abs().max().item(), global_step)
+                        
 
                 optimizer.zero_grad()
                 loss.backward()
