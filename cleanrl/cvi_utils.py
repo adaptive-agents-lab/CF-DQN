@@ -2,33 +2,32 @@ import os
 import torch
 import math
 
-def get_cleaned_target_cf(omega_grid, V_complex_target):
+def get_cleaned_target_cf(omega_grid, V_complex_target, q_min=0.0, q_max=100.0):
     """
-    Cleans the target CF using the EXACT reverse PyTorch DFT operations to prevent aliasing.
+    Cleans the target CF by projecting it onto a valid distribution with support in [q_min, q_max].
+    Uses the EXACT reverse PyTorch DFT operations to prevent aliasing.
+    Requires a uniform frequency grid.
     """
     K = V_complex_target.shape[-1]
     W = torch.abs(omega_grid[0]).item()
     dx = math.pi / W
     x_grid = torch.linspace(- (K // 2) * dx, (K // 2 - 1) * dx, K, device=V_complex_target.device)
     
-    # 1. Frequency -> Spatial (Exact IFFT Sequence)
+    # 1. Frequency -> Spatial: CF uses +i convention, so PDF recovery needs -i (= fft)
     V_shifted = torch.fft.ifftshift(V_complex_target, dim=-1)
-    pdf_complex = torch.fft.ifft(V_shifted, dim=-1)
+    pdf_complex = torch.fft.fft(V_shifted, dim=-1)
     pdf = torch.clamp(torch.fft.fftshift(pdf_complex.real, dim=-1), min=0.0)
     
     # 2. Apply spatial mask to destroy the accumulated noise
-    valid_mask = (x_grid >= 0.0) & (x_grid <= 100.0)
+    valid_mask = (x_grid >= q_min) & (x_grid <= q_max)
     pdf_clean = pdf * valid_mask.float()
     
     # 3. Normalize back to a valid probability distribution
     pdf_clean = pdf_clean / (pdf_clean.sum(dim=-1, keepdim=True) + 1e-8)
     
-    # 4. Spatial -> Frequency (Exact FFT Reverse Sequence)
-    # Reverse of fftshift is ifftshift
+    # 4. Spatial -> Frequency: CF uses +i convention (= K * ifft)
     pdf_unshifted = torch.fft.ifftshift(pdf_clean.to(torch.complex64), dim=-1)
-    # Reverse of ifft is fft
-    V_clean_shifted = torch.fft.fft(pdf_unshifted, dim=-1)
-    # Reverse of ifftshift is fftshift
+    V_clean_shifted = K * torch.fft.ifft(pdf_unshifted, dim=-1)
     cleaned_cf = torch.fft.fftshift(V_clean_shifted, dim=-1)
     
     return cleaned_cf
@@ -44,10 +43,11 @@ def create_uniform_grid(K: int, W: float, device="cpu"):
     grid = torch.linspace(-W, W - dw, K, device=device)
     return grid
 
-def ifft_collapse_q_values(omega_grid, V_complex, return_diagnostics=False):
+def ifft_collapse_q_values(omega_grid, V_complex, q_min=0.0, q_max=100.0, return_diagnostics=False):
     """
     Extracts Q-values by transforming the CF back into a Probability Density Function (PDF)
     using the Inverse Fast Fourier Transform, then computing the expected value E[x].
+    Requires a uniform frequency grid.
     """
     K = V_complex.shape[-1]
     W = torch.abs(omega_grid[0]).item()
@@ -58,11 +58,11 @@ def ifft_collapse_q_values(omega_grid, V_complex, return_diagnostics=False):
     # Construct the corresponding spatial grid x: [-K/2 * dx, (K/2 - 1) * dx]
     x_grid = torch.linspace(- (K // 2) * dx, (K // 2 - 1) * dx, K, device=V_complex.device)
     
-    # Shift frequency 0 to index 0 for standard PyTorch IFFT
+    # Shift frequency 0 to index 0 for standard PyTorch FFT
     V_shifted = torch.fft.ifftshift(V_complex, dim=-1)
     
-    # Perform Inverse FFT to get the unnormalized PDF
-    pdf_complex = torch.fft.ifft(V_shifted, dim=-1)
+    # CF→PDF: the CF uses exp(+iωx), so recovery needs exp(-iωx) = fft convention
+    pdf_complex = torch.fft.fft(V_shifted, dim=-1)
     
     # Shift the spatial zero back to the center and take the real component
     pdf_shifted = torch.fft.fftshift(pdf_complex.real, dim=-1)
@@ -73,7 +73,7 @@ def ifft_collapse_q_values(omega_grid, V_complex, return_diagnostics=False):
     q_unmasked = torch.sum(pdf_unmasked * x_grid, dim=-1)
     
     # 2. Masked Q-value (What the agent uses to act)
-    valid_mask = (x_grid >= 0.0) & (x_grid <= 100.0)
+    valid_mask = (x_grid >= q_min) & (x_grid <= q_max)
     pdf_masked = pdf_unmasked * valid_mask.float()
     pdf_masked = pdf_masked / (pdf_masked.sum(dim=-1, keepdim=True) + 1e-8)
     q_masked = torch.sum(pdf_masked * x_grid, dim=-1)

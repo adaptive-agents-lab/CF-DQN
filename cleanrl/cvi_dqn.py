@@ -16,7 +16,7 @@ from collections import deque
 
 from cleanrl_utils.buffers import ReplayBuffer
 
-from cleanrl.cvi_utils import create_three_density_grid, polar_interpolation, gaussian_collapse_q_values, safe_collapse_q_values, create_uniform_grid, ifft_collapse_q_values, get_cleaned_target_cf
+from cleanrl.cvi_utils import polar_interpolation, create_uniform_grid, ifft_collapse_q_values, get_cleaned_target_cf
 
 
 @dataclass
@@ -54,13 +54,13 @@ class Args:
     num_envs: int = 1
     """the number of parallel game environments"""
     K: int = 128
-    """the number of frequency grid points"""
+    """the number of frequency grid points (must be even)"""
     w: float = 1.0
-    """the frequency range [-W, W] for the grid construction during training"""
-    n_collapse_pairs: int = 1
-    """number of innermost symmetric frequency pairs used to collapse CF → Q-value; MUST satisfy 2*omega_k*Q_max < pi for all pairs used"""
-    q_max_bound: float = 200.0
-    """upper bound on expected Q-values for phase-safety checks (CartPole gamma=0.99: true Q_max~100, 2x margin)"""
+    """the frequency range [-W, W] for the uniform grid"""
+    q_min: float = 0.0
+    """lower bound of the return distribution support (spatial mask); 0 for non-negative reward envs"""
+    q_max: float = 100.0
+    """upper bound of the return distribution support (spatial mask); for CartPole gamma=0.99: R_max/(1-gamma)=100"""
     buffer_size: int = 10000
     """the replay memory buffer size"""
     gamma: float = 0.99
@@ -123,10 +123,14 @@ class CF_QNetwork(nn.Module):
         V_complex = torch.complex(out[..., 0], out[..., 1])
         
         # Hard normalization to ensure V(0) = 1+0j is always respected.
-        # Divide by the value at omega=0 so that the CF is valid by construction.
         # This is mathematically exact: phi(0) = E[e^{i*0*G}] = 1.
         V_at_zero = V_complex[..., self.zero_idx : self.zero_idx + 1]
         V_valid = V_complex / (V_at_zero + 1e-8)
+        
+        # Enforce |V(ω)| ≤ 1: a necessary condition for any valid characteristic function.
+        # Scale down where |V| > 1 while preserving the phase.
+        magnitude = torch.abs(V_valid)
+        V_valid = V_valid / torch.clamp(magnitude, min=1.0)
         
         return V_valid
 
@@ -173,8 +177,7 @@ if __name__ == "__main__":
     
     #! Init CF-Q-Network and Grid
     recent_returns = deque(maxlen=500)
-    #omega_grid = create_uniform_grid(K=args.K, W=args.w, device=device)
-    omega_grid = create_three_density_grid(K=args.K, W=args.w, device=device)
+    omega_grid = create_uniform_grid(K=args.K, W=args.w, device=device)
     actual_grid_size = len(omega_grid)
 
     q_network = CF_QNetwork(envs, actual_grid_size=actual_grid_size).to(device)
@@ -200,10 +203,10 @@ if __name__ == "__main__":
         if random.random() < epsilon:
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
-            #! CVI action selection
+            #! CVI action selection via IFFT
             with torch.no_grad():
                 V_complex_all = q_network(torch.Tensor(obs).to(device))
-                q_values = safe_collapse_q_values(omega_grid, V_complex_all, q_max_hint=args.q_max_bound)
+                q_values = ifft_collapse_q_values(omega_grid, V_complex_all, q_min=args.q_min, q_max=args.q_max)
                 actions = torch.argmax(q_values, dim=1).cpu().numpy()
             
             #* C51 action selection for reference
@@ -257,7 +260,7 @@ if __name__ == "__main__":
                     #    target network EVALUATES it. Decouples selection from evaluation,
                     #    breaking the positive feedback loop that causes Q overestimation.
                     online_V_next_all = q_network(data.next_observations)
-                    online_Q_next = safe_collapse_q_values(omega_grid, online_V_next_all, q_max_hint=args.q_max_bound)
+                    online_Q_next = ifft_collapse_q_values(omega_grid, online_V_next_all, q_min=args.q_min, q_max=args.q_max)
                     next_actions = torch.argmax(online_Q_next, dim=1)  # selected by online network
                     
                     # 3. Select the CF of the greedy action (evaluated by target network)
@@ -271,8 +274,9 @@ if __name__ == "__main__":
                     interp_V = polar_interpolation(omega_grid, target_V_next, gammas)
                     # 6. Apply reward rotation: e^{i * w * R}
                     reward_rotation = torch.exp(1j * omega_grid.view(1, -1) * data.rewards)
-                    # 7. Final Bellman Target
-                    y_target = reward_rotation * interp_V 
+                    # 7. Bellman target, then project onto valid distributions via IFFT cleaning
+                    y_target = reward_rotation * interp_V
+                    y_target = get_cleaned_target_cf(omega_grid, y_target, q_min=args.q_min, q_max=args.q_max)
 
                 current_V_complex_all = q_network(data.observations)
                 current_V = current_V_complex_all[batch_idx, data.actions.flatten()]
@@ -292,7 +296,7 @@ if __name__ == "__main__":
                 if global_step % 100 == 0:
                     writer.add_scalar("losses/loss", loss.item(), global_step)
                     
-                    current_Q_all = safe_collapse_q_values(omega_grid, current_V_complex_all, q_max_hint=args.q_max_bound)
+                    current_Q_all = ifft_collapse_q_values(omega_grid, current_V_complex_all, q_min=args.q_min, q_max=args.q_max)
                     current_Q_taken = current_Q_all[batch_idx, data.actions.flatten()]
                     
                     writer.add_scalar("losses/q_values", current_Q_taken.mean().item(), global_step)
@@ -300,7 +304,7 @@ if __name__ == "__main__":
                     
                     with torch.no_grad():
                         target_V_diag = target_network(data.observations)
-                        target_Q_diag = safe_collapse_q_values(omega_grid, target_V_diag, q_max_hint=args.q_max_bound)
+                        target_Q_diag = ifft_collapse_q_values(omega_grid, target_V_diag, q_min=args.q_min, q_max=args.q_max)
                         target_Q_taken_diag = target_Q_diag[batch_idx, data.actions.flatten()]
                         writer.add_scalar("diagnostics/target_q_values", target_Q_taken_diag.mean().item(), global_step)
                         
@@ -312,20 +316,9 @@ if __name__ == "__main__":
                         action_gap = (q_sorted[:, 0] - q_sorted[:, 1]).mean()
                         writer.add_scalar("diagnostics/action_gap", action_gap.item(), global_step)
                         
-                        # Phase safety check: max phase at collapse pairs
-                        zero_idx_diag = len(omega_grid) // 2
-                        pair1_omega = omega_grid[zero_idx_diag + 1].item()
+                        # CF validity: max magnitude should stay ≤ 1 by construction
                         max_q_est = current_Q_all.abs().max().item()
-                        max_phase = 2 * pair1_omega * max_q_est
-                        writer.add_scalar("diagnostics/max_phase_pair1", max_phase, global_step)
-                        writer.add_scalar("diagnostics/phase_safe", float(max_phase < math.pi), global_step)
                         writer.add_scalar("diagnostics/max_q_magnitude", max_q_est, global_step)
-                        
-                        # Log how many collapse pairs are being used
-                        max_omega_safe = math.pi / (2.0 * args.q_max_bound)
-                        n_safe = sum(1 for k in range(1, zero_idx_diag) if omega_grid[zero_idx_diag + k].item() < max_omega_safe)
-                        n_safe = max(n_safe, 1)
-                        writer.add_scalar("diagnostics/n_safe_pairs", n_safe, global_step)
 
                 optimizer.zero_grad()
                 loss.backward()

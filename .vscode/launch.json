@@ -16,11 +16,13 @@
                 "--w", "1.0",
                 "--track",
                 "--wandb-project-name", "Deep-CVI-Experiments",
-                "--end-e", "0.05",
-                "--seed", "12",
-                "--exploration-fraction", "0.5",
+                "--end-e", "0.00",
+                "--seed", "1",
+                "--exploration-fraction", "0.3",
                 "--buffer-size", "50000",
-                "--q-max-bound", "600.0"
+                "--q-max", "100",
+                "--q-min", "0",
+
             ],
             "justMyCode": true
         },
