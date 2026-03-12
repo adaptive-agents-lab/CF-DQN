@@ -27,6 +27,31 @@
             "justMyCode": true
         },
         {
+            "name": "cvi_dqn LunarLander-v2",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "cleanrl.cvi_dqn",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "args": [
+                "--env-id", "LunarLander-v2",
+                "--total-timesteps", "200000",
+                "--learning-rate", "0.00025",
+                "--batch-size", "128",
+                "--K", "128",
+                "--w", "1.0",
+                "--track",
+                "--wandb-project-name", "Deep-CVI-Experiments",
+                "--end-e", "0.01",
+                "--seed", "1",
+                "--exploration-fraction", "0.3",
+                "--buffer-size", "50000",
+                "--q-max", "120",
+                "--q-min", "0",
+
+            ],
+            "justMyCode": true
+        },
+        {
             "name": "cvi_dqn CartPole-v1 OG",
             "type": "debugpy",
             "request": "launch",
