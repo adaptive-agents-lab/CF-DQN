@@ -6,8 +6,6 @@ def get_cleaned_target_cf(omega_grid, V_complex_target, q_min=0.0, q_max=100.0):
     The goal of this function is pretty simple, take the V_complex_target,
     convert it back to spatial domain to get the PDF, apply the the distributional mask to remove the incoherent probability mass,
     and then convert it back to the frequency domain to get a cleaned CF target.
-    
-    This way we can still use the 
     """
     K = V_complex_target.shape[-1]
     W = torch.abs(omega_grid[0]).item()
@@ -82,46 +80,8 @@ def ifft_collapse_q_values(omega_grid, V_complex, q_min=0.0, q_max=100.0, return
 
     return expected_q_value_scalar
 
-def create_three_density_grid(K: int, W: float, device="cpu"):
-    """
-    Constructs the Three-Density Region frequency grid.
-    Allocates 50% of points to inner 10%, 30% to middle, and 20% to tails.
-    
-    Args:
-        K: Total number of grid points (must be even for symmetry).
-        W: Maximum frequency range [-W, W].
-        device: PyTorch device.
-        
-    Returns:
-        1D Tensor of shape (K + 1,) representing the frequency grid centered at 0.0.
-    """
-    assert K % 2 == 0, "K must be even to maintain perfect symmetry around 0."
-    half_k = K // 2
-    
-    n_inner = int(half_k * 0.50)
-    n_mid = int(half_k * 0.30)
-    n_tail = half_k - n_inner - n_mid
-    
-    inner_bound = 0.1 * W
-    mid_bound = 0.5 * W 
-    
-    omega_min = 1e-3 * W
-    inner = torch.linspace(omega_min, inner_bound, n_inner, device=device)
-    mid = torch.linspace(inner_bound + 1e-4, mid_bound, n_mid, device=device)
-    tail = torch.linspace(mid_bound + 1e-4, W, n_tail, device=device)
-    
-    pos_grid = torch.cat([inner, mid, tail])
-    
-    # Mirror for the negative half, and explicitly insert 0.0 in the exact center
-    neg_grid = -torch.flip(pos_grid, dims=[0])
-    zero_point = torch.tensor([0.0], device=device)
-    
-    grid = torch.cat([neg_grid, zero_point, pos_grid])
-    return grid
-
 def unwrap_phase(phase, dim=-1):
     """
-    ! PyTorch equivalent of numpy.unwrap.
     Removes 2*pi jumps in the phase angle to create a continuous line for interpolation.
     """
     diff = torch.diff(phase, dim=dim)
@@ -130,8 +90,6 @@ def unwrap_phase(phase, dim=-1):
     first_element = phase.narrow(dim, 0, 1)
     unwrapped = torch.cat([first_element, first_element + torch.cumsum(diff_wrapped, dim=dim)], dim=dim)
     
-    #TODO: to plot and see if the unwrapping is correct.
-    #_plot_unwrap_phase_debug(phase, unwrapped, dim)
     return unwrapped
 
 def polar_interpolation(omega_grid, target_V_complex, gammas):
@@ -141,8 +99,6 @@ def polar_interpolation(omega_grid, target_V_complex, gammas):
     """
     magnitudes = torch.abs(target_V_complex) 
     phases = torch.angle(target_V_complex) 
-    
-    # * NEW: Globally unwrap the phase into a continuous line first!
     unwrapped_phases = unwrap_phase(phases, dim=-1)
     
     gamma_target_omega = gammas * omega_grid.view(1, -1) 
@@ -158,72 +114,17 @@ def polar_interpolation(omega_grid, target_V_complex, gammas):
     
     batch_idx = torch.arange(target_V_complex.shape[0], device=target_V_complex.device).unsqueeze(1)
     
-    # 1. Linearly interpolate magnitude
+    #* Linearly interpolate magnitude
     mag_left = magnitudes[batch_idx, idx_left]
     mag_right = magnitudes[batch_idx, idx_right]
     interp_mag = (1 - t) * mag_left + t * mag_right
     
-    # 2. Linearly interpolate the UNWRAPPED phase (Safe from aliasing)
+    #* Linearly interpolate the unwrapped phase
     phase_left = unwrapped_phases[batch_idx, idx_left]
     phase_right = unwrapped_phases[batch_idx, idx_right]
     interp_phase = phase_left + t * (phase_right - phase_left)
     
     return interp_mag * torch.complex(torch.cos(interp_phase), torch.sin(interp_phase))
-
-def gaussian_collapse_q_values(omega_grid, V_complex, n_pairs=5):
-    """
-    Extracts Q-values from the CF via symmetric finite differences at ω→0.
-    Uses circular shortest-path math to ensure the slope is calculated perfectly
-    even if the phase wraps across the -pi/pi boundary.
-    """
-    zero_idx = len(omega_grid) // 2          
-    k = torch.arange(1, n_pairs + 1, device=omega_grid.device)
-    pos_idx = zero_idx + k                   
-    neg_idx = zero_idx - k                   
-
-    omega_pos = omega_grid[pos_idx]          
-    phase = torch.angle(V_complex)          
-
-    phase_pos = phase[..., pos_idx]          
-    phase_neg = phase[..., neg_idx]          
-
-    # Safe circular difference: calculates the true angular distance across the boundary
-    phase_diff = phase_pos - phase_neg
-    phase_diff = (phase_diff + math.pi) % (2 * math.pi) - math.pi
-
-    # Per-pair slope
-    slopes = phase_diff / (2.0 * omega_pos)   
-
-    return slopes.mean(dim=-1)
-
-
-def safe_collapse_q_values(omega_grid, V_complex, q_max_hint=600.0):
-    """
-    Adaptively extracts Q-values using only phase-safe frequency pairs.
-    
-    For each symmetric pair k, the constraint is: 2 * omega_k * |Q| < pi.
-    This function automatically selects the maximum number of usable pairs
-    given q_max_hint, which should be an upper bound on expected Q-values.
-    
-    Falls back to pair-1-only if no multi-pair configuration is safe.
-    """
-    zero_idx = len(omega_grid) // 2
-    
-    # Determine how many pairs are safe: 2 * omega_k * q_max_hint < pi
-    max_omega = math.pi / (2.0 * q_max_hint)
-    
-    # Find how many pairs from center satisfy the constraint
-    n_safe = 0
-    for k in range(1, zero_idx):
-        if omega_grid[zero_idx + k].item() < max_omega:
-            n_safe = k
-        else:
-            break
-    n_safe = max(n_safe, 1)  # Always use at least pair 1
-    
-    return gaussian_collapse_q_values(omega_grid, V_complex, n_pairs=n_safe)
-
-import math
 
 def calculate_optimal_cf_grid_params(q_min: float, q_max: float, desired_resolution=1.0, safety_factor=2.0):
     """

@@ -279,18 +279,18 @@ if __name__ == "__main__":
                     reward_rotation = torch.exp(1j * omega_grid.view(1, -1) * data.rewards)
                     
                     #* 7. Bellman target, then project onto valid distributions via IFFT cleaning
-                    y_target = reward_rotation * interp_V
-                    y_target = get_cleaned_target_cf(omega_grid, y_target, q_min=args.q_min, q_max=args.q_max) #TODO: understand what this function does
+                    td_target_complex_scalar = reward_rotation * interp_V
+                    td_target_complex_scalar = get_cleaned_target_cf(omega_grid, td_target_complex_scalar, q_min=args.q_min, q_max=args.q_max)
 
-                current_V_complex_all = q_network(data.observations)
-                current_V = current_V_complex_all[batch_idx, data.actions.flatten()] #TODO: does this do a avg over the action dimension?
+                current_Q_complex_all = q_network(data.observations)
+                current_V_complex_scalar = current_Q_complex_all[batch_idx, data.actions.flatten()]
                 
                 #*Weighted MSE Loss in Frequency Domain with Gaussian Weights 
                 #! the weights and parameters were left to be tuned (kept the one that were given initially)
                 sigma = 0.3
                 weights = torch.exp(-(omega_grid ** 2) / (2 * sigma ** 2))
                 weights = weights / weights.sum() #* normalize weights to keep loss scale consistent regardless of K or W
-                unweighted_mse = torch.abs(current_V - y_target) ** 2
+                unweighted_mse = torch.abs(current_V_complex_scalar - td_target_complex_scalar) ** 2
                 
                 weighted_mse = torch.sum(weights.view(1, -1) * unweighted_mse, dim=1) #TODO: check weights.view(1, -1)
                 loss = torch.mean(weighted_mse)
@@ -298,7 +298,7 @@ if __name__ == "__main__":
                 if global_step % 100 == 0:
                     writer.add_scalar("losses/loss", loss.item(), global_step)
                     
-                    current_Q_all = ifft_collapse_q_values(omega_grid, current_V_complex_all, q_min=args.q_min, q_max=args.q_max)
+                    current_Q_all = ifft_collapse_q_values(omega_grid, current_Q_complex_all, q_min=args.q_min, q_max=args.q_max)
                     current_Q_taken = current_Q_all[batch_idx, data.actions.flatten()]
                     
                     writer.add_scalar("losses/q_values", current_Q_taken.mean().item(), global_step)
@@ -313,15 +313,15 @@ if __name__ == "__main__":
                         online_target_diff = (current_Q_all - target_Q_diag).abs().mean()
                         writer.add_scalar("diagnostics/q_online_target_diff", online_target_diff.item(), global_step)
                         
-                        # Action gap: difference between best and second-best Q-value
                         q_sorted = current_Q_all.sort(dim=1, descending=True).values
                         action_gap = (q_sorted[:, 0] - q_sorted[:, 1]).mean()
                         writer.add_scalar("diagnostics/action_gap", action_gap.item(), global_step)
                         
-                        # CF validity: max magnitude should stay ≤ 1 by construction
                         max_q_est = current_Q_all.abs().max().item()
                         writer.add_scalar("diagnostics/max_q_magnitude", max_q_est, global_step)
                     
+                    #! Current diagnostics (temporary)
+
                     # === SUSPECT 1: V(0) normalization health ===
                     # If min |V(0)| drops near 0, the division blows up the CF
                     writer.add_scalar("diagnostics/v_at_zero_mag_min", q_network._v_at_zero_mag.min().item(), global_step)
@@ -342,12 +342,12 @@ if __name__ == "__main__":
                     with torch.no_grad():
                         # Compare masked vs unmasked Q-values to see if the mask is clipping real mass
                         q_masked, q_unmasked, pdf_unmasked = ifft_collapse_q_values(
-                            omega_grid, current_V_complex_all, q_min=args.q_min, q_max=args.q_max, return_diagnostics=True
+                            omega_grid, current_Q_complex_all, q_min=args.q_min, q_max=args.q_max, return_diagnostics=True
                         )
                         mask_bias = (q_unmasked - q_masked).abs().mean().item()
                         writer.add_scalar("diagnostics/mask_bias", mask_bias, global_step)
                         # What fraction of PDF mass falls outside [q_min, q_max]?
-                        K = current_V_complex_all.shape[-1]
+                        K = current_Q_complex_all.shape[-1]
                         W = torch.abs(omega_grid[0]).item()
                         dx = math.pi / W
                         x_grid = torch.linspace(-(K // 2) * dx, (K // 2 - 1) * dx, K, device=device)
