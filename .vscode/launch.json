@@ -22,6 +22,8 @@
                 "--buffer-size", "50000",
                 "--q-max", "120",
                 "--q-min", "0",
+                "--target-network-frequency", "0",
+                "--tau", "0.005",
 
             ],
             "justMyCode": true
