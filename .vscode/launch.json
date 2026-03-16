@@ -11,7 +11,7 @@
                 "--env-id", "CartPole-v1",
                 "--total-timesteps", "500000",
                 "--learning-rate", "0.00025",
-                "--batch-size", "128",
+                "--batch-size", "512",
                 "--K", "128",
                 "--w", "0.5",
                 "--track",
@@ -24,6 +24,8 @@
                 "--q-min", "0",
                 "--target-network-frequency", "0",
                 "--tau", "0.005",
+                "--num-envs", "64",
+                "--utd-ratio", "0.125",
 
             ],
             "justMyCode": true

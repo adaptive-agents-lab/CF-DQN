@@ -19,6 +19,8 @@ from cleanrl_utils.buffers import ReplayBuffer
 from cleanrl.cvi_utils import polar_interpolation, create_uniform_grid, ifft_collapse_q_values, get_cleaned_target_cf
 
 
+import torch.profiler
+
 @dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
@@ -51,7 +53,7 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
+    num_envs: int = 16
     """the number of parallel game environments"""
     K: int = 128
     """the number of frequency grid points (must be even)"""
@@ -81,6 +83,8 @@ class Args:
     """timestep to start learning"""
     train_frequency: int = 10
     """the frequency of training"""
+    utd_ratio: float = 0.25
+    """the update-to-data ratio (number of gradient updates per environment step). Used instead of train_frequency when num_envs > 1"""
     max_grad_norm: float = 10.0
     """the maximum gradient norm for clipping"""
 
@@ -143,7 +147,6 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
-    assert args.num_envs == 1, "vectorized envs are not supported at the moment"
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -157,7 +160,11 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"runs/{run_name}")
+        wandb.define_metric("global_step")
+        wandb.define_metric("*", step_metric="global_step")
+        
+    import time
+    writer = SummaryWriter(f"runs/{time.strftime('%Y-%m-%d_%H-%M-%S')}")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
@@ -192,6 +199,7 @@ if __name__ == "__main__":
         envs.single_observation_space,
         envs.single_action_space,
         device,
+        n_envs=args.num_envs,
         handle_timeout_termination=False,
     )
     start_time = time.time()
@@ -199,7 +207,22 @@ if __name__ == "__main__":
 
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
-    for global_step in range(args.total_timesteps):
+    prof = torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        schedule=torch.profiler.schedule(wait=100, warmup=10, active=10, repeat=2),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(f"runs/{run_name}/profiler"),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True
+    )
+    prof.start()
+    
+    global_update_step = 0
+    for iteration in range(0, args.total_timesteps, args.num_envs):
+        global_step = iteration
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
         if random.random() < epsilon:
@@ -223,18 +246,21 @@ if __name__ == "__main__":
             for info in infos["final_info"]:
                 if info and "episode" in info:
                     episode_count += 1
-                    episode_return = info['episode']['r']
-                    episode_length = info['episode']['l']
-                    print(f"global_step={global_step}, episode={episode_count}, episodic_return={episode_return}, episodic_length={episode_length}")
-                    writer.add_scalar("charts/episodic_return", episode_return, global_step)
-                    writer.add_scalar("charts/episodic_length", episode_length, global_step)
+                    ep_return = info['episode']['r']
+                    episode_return = ep_return.item() if hasattr(ep_return, "item") else float(ep_return[0] if isinstance(ep_return, (list, np.ndarray)) else ep_return)
+                    ep_length = info['episode']['l']
+                    episode_length = ep_length.item() if hasattr(ep_length, "item") else int(ep_length[0] if isinstance(ep_length, (list, np.ndarray)) else ep_length)
+                    
                     recent_returns.append(episode_return)
-                    writer.add_scalar("charts/moving_avg_return", np.mean(recent_returns), global_step)
                     
-                    # Log return by episode count for fair comparison across algorithms
-                    writer.add_scalar("charts/episodic_return_by_episode", episode_return, episode_count)
+                    # Reduce logging frequency
+                    if episode_count % 10 == 0:
+                        print(f"global_step={global_step}, episode={episode_count}, episodic_return={episode_return:.2f}, episodic_length={episode_length}")
+                        writer.add_scalar("charts/episodic_return", episode_return, global_step)
+                        writer.add_scalar("charts/episodic_length", episode_length, global_step)
+                        writer.add_scalar("charts/moving_avg_return", np.mean(recent_returns), global_step)
+                        writer.add_scalar("charts/episodic_return_by_episode", episode_return, episode_count)
                     
-                    # Log return at every 100th episode for milestone tracking
                     if episode_count % 100 == 0:
                         writer.add_scalar("charts/episodic_return_per_100_episodes", episode_return, episode_count)
 
@@ -251,7 +277,10 @@ if __name__ == "__main__":
         # ALGO LOGIC: training.
         #! CVI logic
         if global_step > args.learning_starts: #* don't train until we have a certain number of transitions into the buffer
-            if global_step % args.train_frequency == 0:
+            # Calculate how many updates to perform for this batch of environment steps
+            # e.g., if num_envs=16 and utd_ratio=0.25, we do 4 updates
+            num_updates = max(1, int(args.num_envs * args.utd_ratio)) if args.num_envs > 1 else (1 if global_step % args.train_frequency == 0 else 0)
+            for _ in range(num_updates):
                 data = rb.sample(args.batch_size)
                 
                 with torch.no_grad():
@@ -295,7 +324,9 @@ if __name__ == "__main__":
                 weighted_mse = torch.sum(weights.view(1, -1) * unweighted_mse, dim=1) #TODO: check weights.view(1, -1)
                 loss = torch.mean(weighted_mse)
 
-                if global_step % 100 == 0:
+                # Ensure logging frequency is tied to the UTD scaling and environment steps
+                log_freq_scaled = max(1, int(10000 * args.utd_ratio)) if args.num_envs > 1 else max(1, 10000 // args.train_frequency)
+                if global_update_step % log_freq_scaled == 0: #! used to be 100
                     writer.add_scalar("losses/loss", loss.item(), global_step)
                     
                     current_Q_all = ifft_collapse_q_values(omega_grid, current_Q_complex_all, q_min=args.q_min, q_max=args.q_max)
@@ -359,21 +390,28 @@ if __name__ == "__main__":
                 loss.backward()
                 
                 # === GRADIENT HEALTH (must be after backward, before clip) ===
-                if global_step % 100 == 0:
+                if global_update_step % log_freq_scaled == 0:
                     total_grad_norm = sum(p.grad.norm().item() ** 2 for p in q_network.parameters() if p.grad is not None) ** 0.5
                     writer.add_scalar("diagnostics/grad_norm_before_clip", total_grad_norm, global_step)
                 
                 nn.utils.clip_grad_norm_(q_network.parameters(), args.max_grad_norm)
                 optimizer.step()
+                global_update_step += 1
                 
-            #* Target network update
-            if args.target_network_frequency > 0 and global_step % args.target_network_frequency == 0:
-                #* Hard update: periodically copy online -> target
-                target_network.load_state_dict(q_network.state_dict())
-            elif args.target_network_frequency == 0:
-                #* Soft Polyak update every gradient step
-                for target_param, param in zip(target_network.parameters(), q_network.parameters()):
-                    target_param.data.copy_(args.tau * param.data + (1.0 - args.tau) * target_param.data) #! online approximation of Polyak averaging for stability 
+                #* Target network update
+                # Scale target frequency correctly so it maps to environment steps like it used to
+                target_freq_scaled = max(1, int(args.target_network_frequency * args.utd_ratio)) if args.num_envs > 1 else max(1, args.target_network_frequency // args.train_frequency)
+                
+                if args.target_network_frequency > 0 and global_update_step % target_freq_scaled == 0:
+                    #* Hard update: periodically copy online -> target
+                    target_network.load_state_dict(q_network.state_dict())
+                elif args.target_network_frequency == 0:
+                    #* Soft Polyak update every gradient step
+                    for target_param, param in zip(target_network.parameters(), q_network.parameters()):
+                        target_param.data.copy_(args.tau * param.data + (1.0 - args.tau) * target_param.data) #! online approximation of Polyak averaging for stability 
+
+            # Inform the profiler that a step has completed
+            prof.step()
                 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
@@ -409,3 +447,4 @@ if __name__ == "__main__":
 
     envs.close()
     writer.close()
+    prof.stop()

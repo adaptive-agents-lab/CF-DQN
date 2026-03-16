@@ -1,0 +1,40 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Launch TensorBoard",
+            "type": "shell",
+            "command": "source .venv/bin/activate && tensorboard --logdir runs/",
+            "isBackground": true,
+            "problemMatcher": {
+                "pattern": [
+                    {
+                        "regexp": ".",
+                        "file": 1,
+                        "location": 2,
+                        "message": 3
+                    }
+                ],
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "Serving TensorBoard",
+                    "endsPattern": "Press CTRL\\+C to quit"
+                }
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            }
+        },
+        {
+            "label": "Open Chrome (No Web Security)",
+            "type": "shell",
+            "command": "open -n -a '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --args --user-data-dir='/tmp/chrome_dev_test' --disable-web-security 'http://localhost:6006'",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            }
+        }
+    ]
+}
