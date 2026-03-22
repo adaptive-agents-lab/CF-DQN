@@ -1,0 +1,70 @@
+# Symmetric FD — sensitivity study on CartPole-v1
+#
+# Method: grid  →  runs every combination exactly once.
+# Axes of variation:
+#   - seed:             5 seeds for statistical robustness
+#   - n-collapse-pairs: 3, 5, 7, 10 (bias-variance trade-off of Q extraction)
+#   - buffer-size:      10k, 25k, 50k (replay diversity vs convergence speed)
+#
+# Total runs: 5 × 4 × 3 = 60
+# Estimated wall time: ~5h with 2 parallel agents (~5 min per run).
+#
+# Usage:
+#   wandb sweep sweep_sym_fd_cartpolev1.yaml   → prints <SWEEP_ID>
+#   wandb agent <SWEEP_ID>                     → runs sequentially
+#   OR launch multiple agents in parallel terminals for speed.
+
+program: cleanrl/cvi_dqn.py
+method: grid
+name: SymFD-Sensitivity-CartPole-v1
+metric:
+  goal: maximize
+  name: charts/moving_avg_return
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --track
+  - ${args}
+
+parameters:
+  # ── Fixed: environment ───────────────────────────────────────────────────
+  env-id:
+    value: "CartPole-v1"
+  total-timesteps:
+    value: 500000
+  wandb-project-name:
+    value: "CF-DQN-cleanrl"
+
+  # ── Fixed: CF and RL config ──────────────────────────────────────────────
+  K:
+    value: 256
+  w:
+    value: 1.0
+  batch-size:
+    value: 128
+  exploration-fraction:
+    value: 0.3
+  end-e:
+    value: 0.0
+  tau:
+    value: 0.005
+
+  # ── Variable: axes of the sensitivity study ──────────────────────────────
+  seed:
+    values: [1, 2, 3, 4, 5]
+
+  # n_collapse_pairs: sweep concluded n=5 is best; lock it in
+  n-collapse-pairs:
+    value: 5
+
+  # buffer_size: sweep concluded 10k is best; lock it in
+  buffer-size:
+    value: 10000
+
+  # learning-rate: primary driver of bootstrap stability across seeds.
+  # 0.0005 causes Q=86..216 variance across seeds (slope_spread up to 27).
+  # Hypothesis: smaller lr → more stable bootstrap → lower seed variance.
+  learning-rate:
+    values: [0.00005, 0.0001, 0.00025, 0.0005]

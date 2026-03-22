@@ -3,7 +3,7 @@ name = "cleanrl"
 version = "2.0.0b1"
 description = "High-quality single file implementation of Deep Reinforcement Learning algorithms with research-friendly features"
 authors = [{ name = "Costa Huang", email = "costa.huang@outlook.com" }]
-requires-python = ">=3.8,<3.11"
+requires-python = ">=3.8,<3.12"
 readme = "README.md"
 license = "MIT"
 keywords = [
@@ -14,8 +14,9 @@ keywords = [
 dependencies = [
     "tensorboard>=2.10.0",
     "wandb>=0.13.11",
+    "numpy>=1.21.0,<2.0",
     "gym==0.23.1",
-    "gymnasium==0.29.1",
+    "gymnasium[box2d]==0.29.1",
     "torch==2.4.1",
     "moviepy>=1.0.3",
     "pygame>=2.1",
@@ -23,6 +24,8 @@ dependencies = [
     "rich<12.0",
     "tenacity>=8.2.2",
     "tyro>=0.5.10",
+    "matplotlib>=3.7.5",
+    "swig>=4",
 ]
 
 [project.optional-dependencies]
@@ -48,14 +51,6 @@ pettingzoo = [
     "PettingZoo==1.18.1",
     "SuperSuit==3.4.0",
     "multi-agent-ale-py==0.1.11",
-]
-jax = [
-    "jax==0.4.8",
-    "jaxlib==0.4.7",
-    "flax==0.6.8",
-    "optax==0.1.4",
-    "chex==0.1.5",
-    "scipy<1.13.0"
 ]
 optuna = [
     "optuna>=3.0.1,<4",

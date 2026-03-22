@@ -62,8 +62,8 @@ class Args:
     """the return lower bound"""
     v_max: float = 10
     """the return upper bound"""
-    buffer_size: int = 1000000
-    """the replay memory buffer size"""
+    buffer_size: int = 500000
+    """the replay memory buffer size (500K keeps RAM under 16GB for 84x84x4 uint8 frames)"""
     gamma: float = 0.99
     """the discount factor gamma"""
     target_network_frequency: int = 10000
