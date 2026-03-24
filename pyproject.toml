@@ -26,10 +26,11 @@ dependencies = [
     "tyro>=0.5.10",
     "matplotlib>=3.7.5",
     "swig>=4",
-    "jax>=0.6.2",
+    "jax[cuda12]>=0.6.2",
     "equinox>=0.13.6",
     "gymnax>=0.0.9",
     "optax>=0.2.8",
+    "tensorboardX>=2.6",
 ]
 
 [project.optional-dependencies]
@@ -86,6 +87,19 @@ include = [
 include = [
     "cleanrl",
     "cleanrl_utils",
+]
+
+[tool.uv]
+# JAX 0.6.x needs newer NVIDIA libs than PyTorch 2.4 pins
+override-dependencies = [
+    "nvidia-cudnn-cu12>=9.8",
+    "nvidia-cublas-cu12>=12.1",
+    "nvidia-cusparse-cu12>=12.1",
+    "nvidia-cufft-cu12>=11.0.2",
+    "nvidia-cuda-cupti-cu12>=12.1",
+    "nvidia-cuda-runtime-cu12>=12.1",
+    "nvidia-cuda-nvrtc-cu12>=12.1",
+    "nvidia-cusolver-cu12>=11.4",
 ]
 
 [build-system]

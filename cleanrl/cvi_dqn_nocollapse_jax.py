@@ -10,12 +10,11 @@ import optax
 import equinox as eqx
 import gymnax
 import tyro
-from torch.utils.tensorboard import SummaryWriter
+from tensorboardX import SummaryWriter
 
 from cleanrl.cvi_utils_nocollapse_jax import (
     build_analytic_cf,
     sample_frequencies,
-    kappa_quadratic,
 )
 
 
@@ -74,27 +73,27 @@ class Args:
     log_interval: int = 10000
     """log metrics every this many env steps (also the scan chunk size)"""
 
+class CF_QNetwork(eqx.Module):
+    """
+    Analytic Characteristic Function Q-Network.
 
-# ---------------------------------------------------------------------------
-# Network
-# ---------------------------------------------------------------------------
-
-class AnalyticCF_QNetwork(eqx.Module):
-    """Analytic Characteristic Function Q-Network.
-
-    Takes (state, omegas) and outputs two real-valued heads:
-      m(x, ω)  — location / mean  (Q-value at ω=0)
-      σ(x, ω)  — spread / variance (non-negative via softplus)
+    Takes (state, omegas) and outputs two real value heads
+      m(x, ω): mean  (Q-value at ω=0)
+      sigma(x, ω): variance
 
     The CF is constructed analytically:
-      φ(x, ω) = exp( -½ κ(ω) σ  +  i ω m )
+      φ(x, ω) = exp( -1/2 κ(ω) sigma  +  i ω m )
     """
+    
     #* State encoder
     state_layers: list
+    
     #* Frequency embedding (cosine → linear)
     omega_linear: eqx.nn.Linear
+    
     #* Post-combination layers
     combined_layers: list
+    
     #* Dual heads
     m_head: eqx.nn.Linear
     sigma_head: eqx.nn.Linear
@@ -116,8 +115,10 @@ class AnalyticCF_QNetwork(eqx.Module):
             eqx.nn.Linear(obs_size, 120, key=k1),
             eqx.nn.Linear(120, hidden, key=k2),
         ]
+        
         #* ω embedding: cosine features → 84
         self.omega_linear = eqx.nn.Linear(omega_embed_dim, hidden, key=k3)
+        
         #* After element-wise multiply: 84 → 84
         self.combined_layers = [
             eqx.nn.Linear(hidden, hidden, key=k4),
@@ -127,8 +128,8 @@ class AnalyticCF_QNetwork(eqx.Module):
         self.sigma_head = eqx.nn.Linear(hidden, action_dim, key=k6)
 
     def __call__(self, x, omegas):
-        """Forward pass for a single state with N frequencies.
-
+        """
+        Forward pass for a single state with N frequencies.
         Args:
             x:      (obs_dim,) state observation.
             omegas: (N,)       sampled frequencies.
@@ -140,8 +141,7 @@ class AnalyticCF_QNetwork(eqx.Module):
         #* 1. State encoding (shared across all ω)
         h_state = x
         for layer in self.state_layers:
-            h_state = jax.nn.relu(layer(h_state))
-        # h_state: (hidden,)
+            h_state = jax.nn.relu(layer(h_state)) # h_state: (hidden,)
 
         #* 2. Cosine embedding of ω
         i_vals = jnp.arange(1, self.omega_embed_dim + 1, dtype=jnp.float32)
@@ -161,19 +161,16 @@ class AnalyticCF_QNetwork(eqx.Module):
 
         return m, sigma
 
-    def q_values(self, x):
-        """Extract Q-values by evaluating at ω = 0.
+    def q_values(self, x): #! we can use self here since this is a pure function of x and we only __call__
+        """
+        Extract Q-values by evaluating at ω = 0.
 
         At ω=0 the analytic CF reduces to exp(0) = 1,
-        and the m-head output *is* the expected Q-value.
+        and the m-head output is the expected Q-value.
         """
-        m, _ = self(x, jnp.zeros(1))  # (1, action_dim)
+        m, var = self(x, jnp.zeros(1))  # (1, action_dim), (1, action_dim)
         return m[0]                    # (action_dim,)
 
-
-# ---------------------------------------------------------------------------
-# Replay Buffer  (identical to cvi_dqn_jax.py)
-# ---------------------------------------------------------------------------
 
 class ReplayBufferState(eqx.Module):
     """Pure-JAX replay buffer stored as a PyTree."""
@@ -227,10 +224,6 @@ def rb_sample(rb, key, batch_size):
     return rb.obs[indices], rb.next_obs[indices], rb.actions[indices], rb.rewards[indices], rb.dones[indices]
 
 
-# ---------------------------------------------------------------------------
-# Episode Stats  (identical to cvi_dqn_jax.py)
-# ---------------------------------------------------------------------------
-
 class EpisodeStats(eqx.Module):
     episode_returns: jnp.ndarray
     episode_lengths: jnp.ndarray
@@ -267,15 +260,11 @@ def soft_update_target(q_net, target_net, tau):
     return eqx.combine(new_arrays, t_static)
 
 
-# ---------------------------------------------------------------------------
-# Training
-# ---------------------------------------------------------------------------
-
 def make_train(args):
 
     #* Environment
     env, env_params = gymnax.make(args.env_id)
-    obs_size = env.obs_shape[0] if hasattr(env, 'obs_shape') else env.observation_space(env_params).shape[0]
+    obs_size = int(np.prod(env.obs_shape)) if hasattr(env, 'obs_shape') else int(np.prod(env.observation_space(env_params).shape))
     action_dim = env.num_actions
 
     #* Precompute training schedule
@@ -298,19 +287,16 @@ def make_train(args):
         slope = (args.end_e - args.start_e) / (args.exploration_fraction * args.total_timesteps)
         return jnp.maximum(slope * t + args.start_e, args.end_e)
 
-    # ------------------------------------------------------------------
     def gradient_step(q_net, target_net, opt_state, rb, key):
         key, sample_key, omega_key = jax.random.split(key, 3)
         s_obs, s_next_obs, s_actions, s_rewards, s_dones = rb_sample(rb, sample_key, args.batch_size)
 
-        batch_size_ = s_obs.shape[0]
-        batch_idx = jnp.arange(batch_size_)
+        batch_size = s_obs.shape[0]
+        batch_idx = jnp.arange(batch_size)
 
         #* Sample frequencies for this gradient step
         omegas = sample_frequencies(omega_key, args.num_omega_samples, args.omega_max)  # (N,)
         N = args.num_omega_samples
-
-        # ---- Target computation (no grad) ----
 
         #* 1. Action selection via Double DQN: online net SELECTS at ω=0
         online_q_next = jax.vmap(q_net.q_values)(s_next_obs)  # (B, action_dim)
@@ -321,33 +307,29 @@ def make_train(args):
         scaled_omegas = gammas[:, None] * omegas[None, :]      # (B, N)
 
         #* 3. Evaluate target net at (s', γ*ω) for all actions
-        target_m, target_sigma = jax.vmap(target_net)(s_next_obs, scaled_omegas)
-        # target_m: (B, N, action_dim),  target_sigma: (B, N, action_dim)
+        target_m, target_sigma = jax.vmap(target_net)(s_next_obs, scaled_omegas) # target_m: (B, N, action_dim),  target_sigma: (B, N, action_dim)
 
         #* 4. Build target CF via analytic formula
-        target_phi = build_analytic_cf(target_m, target_sigma, scaled_omegas)
-        # target_phi: (B, N, action_dim)
+        target_phi = build_analytic_cf(target_m, target_sigma, scaled_omegas) # target_phi: (B, N, action_dim)
 
         #* 5. Select CF of greedy action from target
         target_phi_selected = target_phi[batch_idx, :, next_actions]  # (B, N)
 
-        #* 6. Reward rotation: exp(i*ω*R)  — uses original ω, not scaled
-        reward_rotation = jnp.exp(1j * omegas[None, :] * s_rewards[:, None])  # (B, N)
+        #* 6. Compute reward CF: e(r) = exp(i * ω * r) for each sample and frequency
+        reward_complex = jnp.exp(1j * omegas[None, :] * s_rewards[:, None])  # (B, N)
 
-        #* 7. Bellman target in CF space
-        td_target = reward_rotation * target_phi_selected  # (B, N)
+        #* 7. Bellman target in CF space: φ(s, ω) = e(r) * φ(s', γ*ω)
+        td_target = reward_complex * target_phi_selected  # (B, N)
         td_target = jax.lax.stop_gradient(td_target)
 
-        # ---- Loss ----
         def loss_fn(net):
             #* Evaluate online net at (s, ω) — same omegas for all samples
-            omegas_batch = jnp.broadcast_to(omegas[None, :], (batch_size_, N))  # (B, N)
+            omegas_batch = jnp.broadcast_to(omegas[None, :], (batch_size, N))  # (B, N)
             online_m, online_sigma = jax.vmap(net)(s_obs, omegas_batch)
             # online_m: (B, N, action_dim),  online_sigma: (B, N, action_dim)
 
             #* Build online CF
-            online_phi = build_analytic_cf(online_m, online_sigma, omegas_batch)
-            # online_phi: (B, N, action_dim)
+            online_phi = build_analytic_cf(online_m, online_sigma, omegas_batch) # (B, N, action_dim)
 
             #* Select CF for the taken action
             online_phi_selected = online_phi[batch_idx, :, s_actions]  # (B, N)
@@ -358,16 +340,16 @@ def make_train(args):
             #* Q-values for logging
             q_all = jax.vmap(net.q_values)(s_obs)  # (B, action_dim)
             q_mean = q_all[batch_idx, s_actions].mean()
+            q_gap = (q_all.max(axis=1) - q_all.min(axis=1)).mean()  # avg spread across actions
 
-            return loss, q_mean
+            return loss, (q_mean, q_gap)
 
-        (loss, q_mean), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(q_net)
+        (loss, (q_mean, q_gap)), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(q_net)
         updates, new_opt_state = optimizer.update(grads, opt_state, eqx.filter(q_net, eqx.is_array))
         new_q_net = eqx.apply_updates(q_net, updates)
 
-        return new_q_net, new_opt_state, key, loss, q_mean
+        return new_q_net, new_opt_state, key, loss, q_mean, q_gap
 
-    # ------------------------------------------------------------------
     def train_step(runner_state, unused):
         q_net, target_net, opt_state, rb, obs, env_states, ep_stats, key, step_count = runner_state
         global_step = step_count * args.num_envs
@@ -387,6 +369,7 @@ def make_train(args):
         key, step_key = jax.random.split(key)
         step_keys = jax.random.split(step_key, args.num_envs)
         next_obs, env_states, rewards, dones, infos = v_step(step_keys, env_states, actions, env_params)
+        next_obs = next_obs.reshape(args.num_envs, -1)
 
         #* Episode stats
         ep_stats = update_episode_stats(ep_stats, rewards, dones)
@@ -402,10 +385,10 @@ def make_train(args):
 
             def scan_grad(carry, _unused):
                 q_n_, opt_s_, key_ = carry
-                q_n_, opt_s_, key_, loss, q_mean = gradient_step(q_n_, target_n, opt_s_, rb_, key_)
-                return (q_n_, opt_s_, key_), (loss, q_mean)
+                q_n_, opt_s_, key_, loss, q_mean, q_gap = gradient_step(q_n_, target_n, opt_s_, rb_, key_)
+                return (q_n_, opt_s_, key_), (loss, q_mean, q_gap)
 
-            (q_n, opt_s, key_), (losses, q_means) = jax.lax.scan(
+            (q_n, opt_s, key_), (losses, q_means, q_gaps) = jax.lax.scan(
                 scan_grad, (q_n, opt_s, key_), None, length=updates_per_step
             )
 
@@ -422,13 +405,13 @@ def make_train(args):
                 effective_tau = min(args.tau * args.num_envs, 1.0)
                 target_n = soft_update_target(q_n, target_n, effective_tau)
 
-            return q_n, target_n, opt_s, key_, losses.mean(), q_means.mean()
+            return q_n, target_n, opt_s, key_, losses.mean(), q_means.mean(), q_gaps.mean()
 
         def skip_train(operand):
             q_n, target_n, opt_s, _rb, key_ = operand
-            return q_n, target_n, opt_s, key_, jnp.float32(0.0), jnp.float32(0.0)
+            return q_n, target_n, opt_s, key_, jnp.float32(0.0), jnp.float32(0.0), jnp.float32(0.0)
 
-        q_net, target_net, opt_state, key, mean_loss, mean_q = jax.lax.cond(
+        q_net, target_net, opt_state, key, mean_loss, mean_q, mean_q_gap = jax.lax.cond(
             is_training, do_train, skip_train,
             (q_net, target_net, opt_state, rb, key),
         )
@@ -438,6 +421,7 @@ def make_train(args):
         metrics = {
             "loss": mean_loss,
             "q_values": mean_q,
+            "q_gap": mean_q_gap,
             "epsilon": epsilon,
             "returned_episode_returns": ep_stats.returned_episode_returns,
             "returned_episode_lengths": ep_stats.returned_episode_lengths,
@@ -453,23 +437,19 @@ def make_train(args):
 
     def init_runner_state(key):
         key, q_key = jax.random.split(key)
-        q_net = AnalyticCF_QNetwork(obs_size, action_dim, args.omega_embed_dim, key=q_key)
-        target_net = AnalyticCF_QNetwork(obs_size, action_dim, args.omega_embed_dim, key=q_key)
+        q_net = CF_QNetwork(obs_size, action_dim, args.omega_embed_dim, key=q_key)
+        target_net = CF_QNetwork(obs_size, action_dim, args.omega_embed_dim, key=q_key)
         opt_state = optimizer.init(eqx.filter(q_net, eqx.is_array))
         rb = ReplayBufferState.create(args.buffer_size, obs_size)
 
         key, *env_keys = jax.random.split(key, args.num_envs + 1)
         obs, env_states = v_reset(jnp.stack(env_keys), env_params)
+        obs = obs.reshape(args.num_envs, -1)
         ep_stats = EpisodeStats.create(args.num_envs)
 
         return (q_net, target_net, opt_state, rb, obs, env_states, ep_stats, key, jnp.int32(0))
 
     return train_chunk, init_runner_state, num_chunks, chunk_steps
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     current_time = time.strftime('%Y-%m-%d_%H-%M-%S')
@@ -512,6 +492,7 @@ if __name__ == "__main__":
         lengths = jax.device_get(metrics["returned_episode_lengths"])
         losses = jax.device_get(metrics["loss"])
         q_vals = jax.device_get(metrics["q_values"])
+        q_gaps = jax.device_get(metrics["q_gap"])
         epsilons = jax.device_get(metrics["epsilon"])
         global_steps = jax.device_get(metrics["global_step"])
 
@@ -533,12 +514,13 @@ if __name__ == "__main__":
         last_step = int(global_steps[-1])
         last_loss = float(losses[-1])
         last_q = float(q_vals[-1])
+        last_q_gap = float(q_gaps[-1])
         last_eps = float(epsilons[-1])
         sps = int(last_step / (time.time() - start_time)) if last_step > 0 else 0
         avg_return = float(np.mean(recent_returns)) if recent_returns else 0.0
 
         print(f"step={last_step:>7d} | episodes={episode_count:>5d} | "
-              f"avg_return={avg_return:>7.2f} | loss={last_loss:.4f} | "
+              f"avg_return={avg_return:>7.2f} | loss={last_loss:.4f} | q_gap={last_q_gap:.4f} | "
               f"eps={last_eps:.3f} | SPS={sps}")
 
         writer.add_scalar("charts/moving_avg_return", avg_return, last_step)
@@ -546,6 +528,7 @@ if __name__ == "__main__":
         writer.add_scalar("charts/epsilon", last_eps, last_step)
         writer.add_scalar("losses/loss", last_loss, last_step)
         writer.add_scalar("losses/q_values", last_q, last_step)
+        writer.add_scalar("losses/q_gap", last_q_gap, last_step)
 
     if args.save_model:
         q_net = runner_state[0]

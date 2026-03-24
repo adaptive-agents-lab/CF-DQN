@@ -2,31 +2,29 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "cvi_dqn CartPole-v1",
+            "name": "cvi_nocollapse_jax CartPole-v1",
             "type": "debugpy",
             "request": "launch",
-            "module": "cleanrl.cvi_dqn",
+            "module": "cleanrl.cvi_dqn_nocollapse_jax",
             "python": "${workspaceFolder}/.venv/bin/python",
             "args": [
                 "--env-id", "CartPole-v1",
                 "--total-timesteps", "500000",
                 "--learning-rate", "0.00025",
-                "--batch-size", "512",
-                "--K", "256",
-                "--w", "0.5",
-                "--track",
-                "--wandb-project-name", "Deep-CVI-Experiments",
-                "--end-e", "0.01",
+                "--batch-size", "256",
+                "--num-omega-samples", "32",
+                "--omega-max", "0.01",
+                "--omega-embed-dim", "64",
+                "--end-e", "0.05",
                 "--seed", "300",
                 "--exploration-fraction", "0.3",
-                "--buffer-size", "50000",
-                "--q-max", "120",
-                "--q-min", "0",
+                "--buffer-size", "10000",
                 "--target-network-frequency", "0",
                 "--tau", "0.005",
-                "--num-envs", "48",
-                "--utd-ratio", "0.1"
-
+                "--num-envs", "32",
+                "--utd-ratio", "0.1",
+                "--track",
+                "--wandb-project-name", "Deep-CVI-Experiments"
             ],
             "justMyCode": true
         },
@@ -55,55 +53,6 @@
                 "--tau", "0.005",
                 "--num-envs", "48",
                 "--utd-ratio", "0.1"
-
-            ],
-            "justMyCode": true
-        },
-        {
-            "name": "cvi_dqn LunarLander-v2",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "cleanrl.cvi_dqn",
-            "python": "${workspaceFolder}/.venv/bin/python",
-            "args": [
-                "--env-id", "LunarLander-v2",
-                "--total-timesteps", "200000",
-                "--learning-rate", "0.00025",
-                "--batch-size", "128",
-                "--K", "128",
-                "--w", "1.0",
-                "--track",
-                "--wandb-project-name", "Deep-CVI-Experiments",
-                "--end-e", "0.01",
-                "--seed", "1",
-                "--exploration-fraction", "0.3",
-                "--buffer-size", "50000",
-                "--q-max", "120",
-                "--q-min", "0",
-
-            ],
-            "justMyCode": true
-        },
-        {
-            "name": "cvi_dqn CartPole-v1 OG",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "cleanrl.cvi_dqn",
-            "python": "${workspaceFolder}/.venv/bin/python",
-            "args": [
-                "--env-id", "CartPole-v1",
-                "--total-timesteps", "500000",
-                "--learning-rate", "0.0005",
-                "--batch-size", "128",
-                "--K", "256",
-                "--w", "1.0",
-                "--track",
-                "--wandb-project-name", "Deep-CVI-Experiments",
-                "--end-e", "0.0",
-                "--seed", "12",
-                "--exploration-fraction", "0.3",
-                "--buffer-size", "50000", 
-                "--n-collapse-pairs", "5",
 
             ],
             "justMyCode": true
@@ -160,6 +109,88 @@
                 "--train-frequency", "4"
             ],
             "justMyCode": true
-        }
+        },
+        {
+            "name": "cvi_nocollapse_jax Atari Breakout",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "cleanrl.cvi_dqn_nocollapse_jax",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "args": [
+                "--env-id", "BreakoutNoFrameskip-v4",
+                "--total-timesteps", "500000", 
+                "--learning-rate", "0.00025",
+                "--batch-size", "256",
+                "--num-omega-samples", "32",
+                "--omega-max", "0.01",
+                "--omega-embed-dim", "64",
+                "--end-e", "0.05",
+                "--seed", "300",
+                "--exploration-fraction", "0.3",
+                "--buffer-size", "10000",
+                "--target-network-frequency", "0",
+                "--tau", "0.005",
+                "--num-envs", "32",
+                "--utd-ratio", "0.1",
+                "--track",
+                "--wandb-project-name", "Deep-CVI-Experiments"
+            ],
+            "justMyCode": true
+        },
+        {
+            "name": "cvi_nocollapse_jax Breakout MinAtar",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "cleanrl.cvi_dqn_nocollapse_jax",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "args": [
+                "--env-id", "Breakout-MinAtar",
+                "--total-timesteps", "10000000",
+                "--learning-rate", "0.00025",
+                "--batch-size", "256",
+                "--num-omega-samples", "32",
+                "--omega-max", "0.05",
+                "--omega-embed-dim", "64",
+                "--end-e", "0.05",
+                "--seed", "1",
+                "--exploration-fraction", "0.3",
+                "--buffer-size", "50000",
+                "--target-network-frequency", "0",
+                "--tau", "0.005",
+                "--num-envs", "32",
+                "--utd-ratio", "0.1",
+                "--track",
+                "--wandb-project-name", "Deep-CVI-Experiments"
+            ],
+            "justMyCode": true
+        },
+        {
+            "name": "cvi_dqn_jax Breakout MinAtar",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "cleanrl.cvi_dqn_jax",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "args": [
+                "--env-id", "Breakout-MinAtar",
+                "--total-timesteps", "10000000",
+                "--learning-rate", "0.00025",
+                "--batch-size", "256",
+                "--K", "128",
+                "--w", "0.1",
+                "--q-min", "0",
+                "--q-max", "500",
+                "--end-e", "0.05",
+                "--seed", "1",
+                "--exploration-fraction", "0.3",
+                "--buffer-size", "50000",
+                "--target-network-frequency", "0",
+                "--tau", "0.005",
+                "--num-envs", "32",
+                "--utd-ratio", "0.1",
+                "--track",
+                "--wandb-project-name", "Deep-CVI-Experiments"
+            ],
+            "justMyCode": true
+        },
     ]
 }

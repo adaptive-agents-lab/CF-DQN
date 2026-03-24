@@ -223,7 +223,7 @@ def make_train(args):
 
     #* Environment
     env, env_params = gymnax.make(args.env_id)
-    obs_size = env.obs_shape[0] if hasattr(env, 'obs_shape') else env.observation_space(env_params).shape[0] #TODO: sloppy implementation
+    obs_size = int(np.prod(env.obs_shape)) if hasattr(env, 'obs_shape') else int(np.prod(env.observation_space(env_params).shape))
     action_dim = env.num_actions
 
     #! Init grid
@@ -324,6 +324,7 @@ def make_train(args):
         key, step_key = jax.random.split(key)
         step_keys = jax.random.split(step_key, args.num_envs)
         next_obs, env_states, rewards, dones, infos = v_step(step_keys, env_states, actions, env_params)
+        next_obs = next_obs.reshape(args.num_envs, -1)
 
         #* Episode stats
         ep_stats = update_episode_stats(ep_stats, rewards, dones)
@@ -400,6 +401,7 @@ def make_train(args):
 
         key, *env_keys = jax.random.split(key, args.num_envs + 1)
         obs, env_states = v_reset(jnp.stack(env_keys), env_params)
+        obs = obs.reshape(args.num_envs, -1)
         ep_stats = EpisodeStats.create(args.num_envs)
 
         return (q_net, target_net, opt_state, rb, obs, env_states, ep_stats, key, jnp.int32(0))
