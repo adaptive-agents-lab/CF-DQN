@@ -36,4 +36,6 @@ def sample_frequencies(key, num_samples, omega_max):
 
     Easy to swap with Gaussian / curriculum-based sampling later.
     """
+    
+    #TODO: make sure we only sampel form positive frequencies
     return jax.random.uniform(key, shape=(num_samples,), minval=-omega_max, maxval=omega_max)
