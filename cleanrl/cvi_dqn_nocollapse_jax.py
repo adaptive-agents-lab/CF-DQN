@@ -2,6 +2,7 @@ import os
 import time
 from dataclasses import dataclass
 from functools import partial
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -33,6 +34,8 @@ class Args:
     """the entity (team) of wandb's project"""
     save_model: bool = False
     """whether to save model into the `runs/{run_name}` folder"""
+    wandb_tags: str = ""
+    """comma-separated wandb run tags (e.g. MoG)"""
 
     # Algorithm specific arguments
     env_id: str = "CartPole-v1"
@@ -461,14 +464,17 @@ if __name__ == "__main__":
 
     if args.track:
         import wandb
-        wandb.init(
+        _tags = [t.strip() for t in args.wandb_tags.split(",") if t.strip()]
+        _wb = dict[str, str | bool | dict[str, Any]](
             project=args.wandb_project_name,
-            entity=args.wandb_entity,
+            entity=args.wandb_entity,   
             sync_tensorboard=True,
             config=vars(args),
             name=run_name,
-            save_code=True,
-        )
+            save_code=True,)
+        if _tags:
+            _wb["tags"] = _tags
+        wandb.init(**_wb)
         wandb.define_metric("global_step")
         wandb.define_metric("*", step_metric="global_step")
 

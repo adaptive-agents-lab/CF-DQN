@@ -33,6 +33,8 @@ class Args:
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
+    wandb_tags: str = ""
+    """comma-separated wandb run tags (e.g. FFT)"""
     save_model: bool = False
     """whether to save model into the `runs/{run_name}` folder"""
 
@@ -416,7 +418,8 @@ if __name__ == "__main__":
 
     if args.track:
         import wandb
-        wandb.init(
+        _tags = [t.strip() for t in args.wandb_tags.split(",") if t.strip()]
+        _wb = dict(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
             sync_tensorboard=True,
@@ -424,6 +427,9 @@ if __name__ == "__main__":
             name=run_name,
             save_code=True,
         )
+        if _tags:
+            _wb["tags"] = _tags
+        wandb.init(**_wb)
         wandb.define_metric("global_step")
         wandb.define_metric("*", step_metric="global_step")
 
