@@ -30,6 +30,18 @@
         //     ],
         //     "justMyCode": true
         // },
+
+        {
+            "name": "plot_wandb_episodic_return",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/plot_wandb_episodic_return.py",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+
         {
             "name": "cvi_nocollapse_jax Breakout MinAtar",
             "type": "debugpy",
@@ -38,7 +50,7 @@
             "python": "${workspaceFolder}/.venv/bin/python",
             "args": [
                 "--env-id", "Breakout-MinAtar",
-                "--total-timesteps", "3000000",
+                "--total-timesteps", "25000000", // 3M
                 "--learning-rate", "0.00025",
                 "--batch-size", "512",
                 "--num-omega-samples", "128",

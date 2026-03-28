@@ -5,20 +5,11 @@ Fetch Weights & Biases runs by tags and plot charts/episodic_return (mean ± std
 Requires: pip install wandb matplotlib numpy
 Login once: wandb login
 
-Usage (import and call with your arguments):
+**Single environment** (e.g. Breakout only): pass ``env_name`` for the title; leave ``env_ids`` unset.
 
-    from plot_wandb_episodic_return import plot_episodic_return
-
-    plot_episodic_return(
-        project="Deep-CVI-Experiments",
-        entity=None,
-        required_tag=[],
-        algo_tags=["MoG", "FFT", "dqn"],
-        out="figures/breakout_episodic_return.png",
-        env_name="Breakout MinAtar",
-    )
-
-Each run should carry exactly one of the ``algo_tags`` on W&B.
+**MinAtar 10M sweep**: pass ``experiment_tag="MinAtar_10M"`` and ``env_ids``. Runs are filtered by
+tags (experiment + one algo tag). Environment is taken from ``config.env_id`` when present; otherwise
+from the W&B **run name**, which is ``{env_id}__{exp_name}__{seed}__...`` (first segment = env).
 """
 from __future__ import annotations
 
@@ -42,6 +33,28 @@ def _wandb_path(entity: str | None, project: str) -> str:
     if entity:
         return f"{entity}/{project}"
     return project
+
+
+def _parse_env_id_from_run_name(name: str | None) -> str | None:
+    """Training uses ``wandb.init(..., name=f"{env_id}__{exp_name}__{seed}__{time}")`` — env is the first segment."""
+    if not name:
+        return None
+    s = str(name).strip()
+    if "__" not in s:
+        return None
+    return s.split("__", 1)[0].strip() or None
+
+
+def _get_run_env_id(run, *, use_run_name: bool = True) -> str | None:
+    """Prefer ``config.env_id``; if missing, parse from ``run.name`` (see ``_parse_env_id_from_run_name``)."""
+    cfg = getattr(run, "config", None)
+    if cfg is not None and hasattr(cfg, "get"):
+        v = cfg.get("env_id")
+        if v is not None and str(v).strip() != "":
+            return str(v)
+    if use_run_name:
+        return _parse_env_id_from_run_name(getattr(run, "name", None))
+    return None
 
 
 def _run_matches_required(run, required: list[str]) -> bool:
@@ -109,7 +122,6 @@ def _smooth_1d(y: np.ndarray, window: int) -> np.ndarray:
         w = n if n % 2 == 1 else n - 1
     if w < 3:
         return y
-    # Fill NaNs for convolution, then restore NaN where entire window was NaN (optional skip)
     bad = ~np.isfinite(y)
     if np.any(bad) and np.any(~bad):
         idx = np.arange(n)
@@ -122,9 +134,75 @@ def _smooth_1d(y: np.ndarray, window: int) -> np.ndarray:
 
 
 def _pretty_metric_label(metric: str) -> str:
-    """Last path segment, underscores → spaces, title case (e.g. charts/episodic_return → Episodic Return)."""
     tail = metric.split("/")[-1]
     return tail.replace("_", " ").strip().title()
+
+
+def _pretty_env_title(env_id: str) -> str:
+    if env_id.endswith("-MinAtar"):
+        return env_id.replace("-MinAtar", " MinAtar").replace("-", " ")
+    return env_id.replace("-", " ").replace("_", " ").title()
+
+
+def _draw_algo_curves_on_ax(
+    ax,
+    by_algo: dict[str, list],
+    algo_tags: list[str],
+    colors: np.ndarray,
+    *,
+    grid_points: int,
+    smooth_window: int,
+    step_metric: str,
+    metric: str,
+    show_ylabel: bool,
+    autoscale_y: bool = False,
+    y_top_margin: float = 0.1,
+    y_bottom: float | None = 0.0,
+) -> None:
+    """If ``autoscale_y``, set y-axis to ``[y_bottom, (max of mean+std) * (1 + y_top_margin)]`` per panel."""
+    ymax_track = -np.inf
+    ymin_track = np.inf
+
+    for idx, algo_tag in enumerate(algo_tags):
+        curves = by_algo.get(algo_tag, [])
+        if not curves:
+            continue
+        all_steps = np.concatenate([c[0] for c in curves])
+        s_min, s_max = np.nanmin(all_steps), np.nanmax(all_steps)
+        if not np.isfinite(s_min) or not np.isfinite(s_max) or s_max <= s_min:
+            continue
+        grid = np.linspace(s_min, s_max, grid_points)
+        mat = _interp_on_grid(curves, grid)
+        mean = np.nanmean(mat, axis=0)
+        std = np.nanstd(mat, axis=0)
+        if smooth_window and smooth_window > 1:
+            mean = _smooth_1d(mean, smooth_window)
+            std = _smooth_1d(std, smooth_window)
+        upper = mean + std
+        lower = mean - std
+        ymax_track = max(ymax_track, float(np.nanmax(upper)))
+        ymin_track = min(ymin_track, float(np.nanmin(lower)))
+
+        label = "DQN" if algo_tag == "dqn" else algo_tag
+        c = colors[idx % len(colors)]
+        ax.plot(grid, mean, color=c, linewidth=2.0, label=f"{label} (n={len(curves)})")
+        ax.fill_between(grid, lower, upper, color=c, alpha=0.2)
+
+    ax.set_xlabel(step_metric)
+    if show_ylabel:
+        ax.set_ylabel(metric)
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    if autoscale_y and np.isfinite(ymax_track) and ymax_track > 0:
+        top = ymax_track * (1.0 + y_top_margin)
+        if y_bottom is not None:
+            bot = float(y_bottom)
+        elif np.isfinite(ymin_track) and ymin_track < 0:
+            bot = ymin_track * (1.0 + y_top_margin)
+        else:
+            bot = 0.0
+        ax.set_ylim(bottom=bot, top=top)
 
 
 def plot_episodic_return(
@@ -140,27 +218,107 @@ def plot_episodic_return(
     max_runs: int = 500,
     smooth_window: int = 41,
     env_name: str = "Breakout MinAtar",
+    experiment_tag: str | None = None,
+    env_ids: list[str] | None = None,
+    use_run_name_for_env: bool = True,
+    multi_env_y_top_margin: float = 0.1,
 ) -> None:
-    """Fetch W&B runs, group by algo tags, plot mean ± std of ``metric`` vs ``step_metric``.
+    """Plot mean ± std episodic return from W&B.
 
-    ``smooth_window``: centered moving-average length on the interpolation grid (odd; set 0 to disable).
-    Larger ``grid_points`` + moderate ``smooth_window`` yields smoother curves.
+    - **Legacy (single panel):** leave ``env_ids`` as ``None``. Optionally set ``experiment_tag`` to filter runs.
+    - **One env, filtered by id:** ``env_ids=[\"Breakout-MinAtar\"]`` and ``experiment_tag`` if needed.
+    - **Five-env grid:** pass ``experiment_tag`` (e.g. ``\"MinAtar_10M\"``) and ``env_ids`` with 2+ entries;
+      one subplot per env, **independent y-axes** (not shared). Each panel’s top is
+      ``(max of mean+std across algos) * (1 + multi_env_y_top_margin)`` (default 10 % headroom) so scales
+      match each game.
 
-    Title: metric name on the first line, then ``env_name``
+    If ``config.env_id`` is missing on older runs, set ``use_run_name_for_env=True`` (default) to recover
+    env from ``run.name``.
     """
     if required_tag is None:
         required_tag = []
     if algo_tags is None:
         algo_tags = ["MoG", "FFT", "dqn"]
 
+    required_effective = list(required_tag)
+    if experiment_tag:
+        required_effective.append(experiment_tag)
+
     api = wandb.Api()
     path = _wandb_path(entity, project)
     runs = list(api.runs(path, order="-created_at"))[:max_runs]
 
+    colors = plt.cm.tab10(np.linspace(0, 0.9, max(len(algo_tags), 1)))
+    metric_title = _pretty_metric_label(metric)
+
+    os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
+
+    # ----- Multi-env grid (e.g. MinAtar_10M × 5 games) -----
+    if env_ids is not None and len(env_ids) > 1:
+        by_env_algo: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+        for run in runs:
+            if not _run_matches_required(run, required_effective):
+                continue
+            eid = _get_run_env_id(run, use_run_name=use_run_name_for_env)
+            if eid is None or eid not in env_ids:
+                continue
+            g = _algo_group(run, algo_tags)
+            if g is None:
+                continue
+            series = _load_series(run, metric, step_metric)
+            if series is None:
+                continue
+            by_env_algo[eid][g].append(series)
+
+        if not by_env_algo:
+            raise RuntimeError(
+                "No runs matched. Check experiment_tag, env_ids, algo tags, and env (config.env_id or run.name)."
+            )
+
+        n = len(env_ids)
+        fig_w = max(14, 3.2 * n)
+        fig, axes = plt.subplots(1, n, figsize=(fig_w, 4.2), sharey=False, squeeze=False)
+        ax_flat = axes[0]
+
+        for j, eid in enumerate(env_ids):
+            ax = ax_flat[j]
+            by_algo = by_env_algo.get(eid, {})
+            if not any(len(by_algo.get(t, [])) > 0 for t in algo_tags):
+                ax.text(0.5, 0.5, "No runs", ha="center", va="center", transform=ax.transAxes)
+            else:
+                _draw_algo_curves_on_ax(
+                    ax,
+                    dict(by_algo),
+                    algo_tags,
+                    colors,
+                    grid_points=grid_points,
+                    smooth_window=smooth_window,
+                    step_metric=step_metric,
+                    metric=metric,
+                    show_ylabel=(j == 0),
+                    autoscale_y=True,
+                    y_top_margin=multi_env_y_top_margin,
+                    y_bottom=0.0,
+                )
+            ax.set_title(_pretty_env_title(eid), fontsize=10)
+
+        et = experiment_tag or ""
+        supt = f"{et} {metric_title}  "
+        fig.suptitle(supt, fontsize=12, y=1.03)
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+        fig.savefig(out, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Wrote {out}")
+        return
+
+    # ----- Single panel -----
     by_algo: dict[str, list] = defaultdict(list)
     for run in runs:
-        if not _run_matches_required(run, required_tag):
+        if not _run_matches_required(run, required_effective):
             continue
+        if env_ids is not None and len(env_ids) == 1:
+            if _get_run_env_id(run, use_run_name=use_run_name_for_env) != env_ids[0]:
+                continue
         g = _algo_group(run, algo_tags)
         if g is None:
             continue
@@ -171,61 +329,99 @@ def plot_episodic_return(
 
     if not by_algo:
         raise RuntimeError(
-            "No runs matched. Check entity, project, required_tag, and algo_tags "
-            "(runs must include one of the algo tags, e.g. MoG, FFT, or dqn)."
+            "No runs matched. Check entity, project, experiment_tag, required_tag, env_ids, and algo_tags."
         )
 
-    os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
-
     plt.figure(figsize=(10, 6))
-    colors = plt.cm.tab10(np.linspace(0, 0.9, max(len(algo_tags), 1)))
-
-    for idx, algo_tag in enumerate(algo_tags):
-        curves = by_algo.get(algo_tag, [])
-        if not curves:
-            print(f"Warning: no runs for algo tag {algo_tag!r}")
-            continue
-        all_steps = np.concatenate([c[0] for c in curves])
-        s_min, s_max = np.nanmin(all_steps), np.nanmax(all_steps)
-        if not np.isfinite(s_min) or not np.isfinite(s_max) or s_max <= s_min:
-            continue
-        grid = np.linspace(s_min, s_max, grid_points)
-        mat = _interp_on_grid(curves, grid)
-        mean = np.nanmean(mat, axis=0)
-        std = np.nanstd(mat, axis=0)
-        if smooth_window and smooth_window > 1:
-            mean = _smooth_1d(mean, smooth_window)
-            std = _smooth_1d(std, smooth_window)
-        label = "DQN" if algo_tag == "dqn" else algo_tag
-        c = colors[idx % len(colors)]
-        plt.plot(grid, mean, color=c, linewidth=2.0, label=f"{label} (n={len(curves)})")
-        plt.fill_between(grid, mean - std, mean + std, color=c, alpha=0.2)
-
-    plt.xlabel(step_metric)
-    plt.ylabel(metric)
-    metric_title = _pretty_metric_label(metric)
-    plt.title(
-        f"{metric_title} in {env_name}",
-        fontsize=12,
+    _draw_algo_curves_on_ax(
+        plt.gca(),
+        dict(by_algo),
+        algo_tags,
+        colors,
+        grid_points=grid_points,
+        smooth_window=smooth_window,
+        step_metric=step_metric,
+        metric=metric,
+        show_ylabel=True,
     )
-    plt.legend()
-    plt.grid(True, alpha=0.3)
+    plt.title(f"{metric_title} in {env_name}", fontsize=12)
     plt.tight_layout()
     plt.savefig(out, dpi=150)
+    plt.close()
     print(f"Wrote {out}")
 
 
+def plot_minatar_10m_grid(
+    *,
+    project: str = "Deep-CVI-Experiments",
+    entity: str | None = None,
+    out: str = "figures/minatar_10m_episodic_return.png",
+    experiment_tag: str = "MinAtar_10M",
+    env_ids: list[str] | None = None,
+    use_run_name_for_env: bool = True,
+    **kwargs,
+) -> None:
+    """Convenience wrapper: 5-env MinAtar (+ Pong-misc) grid, same defaults as the 10M Slurm sweep."""
+    if env_ids is None:
+        env_ids = [
+            "Asterix-MinAtar",
+            "Breakout-MinAtar",
+            "Freeway-MinAtar",
+            "SpaceInvaders-MinAtar",
+            "Pong-misc",
+        ]
+    plot_episodic_return(
+        project=project,
+        entity=entity,
+        experiment_tag=experiment_tag,
+        env_ids=env_ids,
+        out=out,
+        use_run_name_for_env=use_run_name_for_env,
+        **kwargs,
+    )
+
+
 if __name__ == "__main__":
+    # Comment out the experiment you are *not* plotting; leave exactly one ``plot_episodic_return`` call active.
+    # -------------------------------------------------------------------------
+
+    # (1) Breakout MinAtar — 3 algos (MoG / FFT / dqn), 3M-step sweep (no MinAtar_10M tag).
+    # plot_episodic_return(
+    #     project="Deep-CVI-Experiments",
+    #     entity=None,
+    #     required_tag=[],
+    #     algo_tags=["MoG", "FFT", "dqn"],
+    #     experiment_tag=None,
+    #     env_ids=["Breakout-MinAtar"],
+    #     use_run_name_for_env=True,
+    #     metric="charts/episodic_return",
+    #     step_metric="global_step",
+    #     out="figures/breakout_3algo_3M_episodic_return.png",
+    #     grid_points=800,
+    #     max_runs=500,
+    #     smooth_window=41,
+    #     env_name="Breakout MinAtar",
+    # )
+
+    # (2) MinAtar 10M — 5 games in one figure; tags: MinAtar_10M + MoG|FFT|dqn; env from config or run name prefix.
     plot_episodic_return(
         project="Deep-CVI-Experiments",
         entity=None,
         required_tag=[],
         algo_tags=["MoG", "FFT", "dqn"],
+        experiment_tag="MinAtar_10M",
+        env_ids=[
+            "Asterix-MinAtar",
+            "Breakout-MinAtar",
+            "Freeway-MinAtar",
+            "SpaceInvaders-MinAtar",
+            "Pong-misc",
+        ],
+        use_run_name_for_env=True,
         metric="charts/episodic_return",
         step_metric="global_step",
-        out="figures/breakout_episodic_return.png",
+        out="figures/minatar_10m_5env_episodic_return.png",
         grid_points=800,
-        max_runs=500,
+        max_runs=2000,
         smooth_window=41,
-        env_name="Breakout MinAtar",
     )
