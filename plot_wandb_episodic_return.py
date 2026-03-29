@@ -358,18 +358,25 @@ def plot_minatar_10m_grid(
     out: str = "figures/minatar_10m_episodic_return.png",
     experiment_tag: str = "MinAtar_10M",
     env_ids: list[str] | None = None,
+    include_pong_misc: bool = False,
     use_run_name_for_env: bool = True,
     **kwargs,
 ) -> None:
-    """Convenience wrapper: 5-env MinAtar (+ Pong-misc) grid, same defaults as the 10M Slurm sweep."""
+    """Convenience wrapper for the MinAtar 10M multi-env figure.
+
+    By default uses **four** MinAtar games (Asterix, Breakout, Freeway, Space Invaders). Set
+    ``include_pong_misc=True`` to add ``Pong-misc`` as a fifth panel (Slurm stand-in for Seaquest).
+    If ``env_ids`` is passed explicitly, ``include_pong_misc`` is ignored.
+    """
     if env_ids is None:
         env_ids = [
             "Asterix-MinAtar",
             "Breakout-MinAtar",
             "Freeway-MinAtar",
             "SpaceInvaders-MinAtar",
-            "Pong-misc",
         ]
+        if include_pong_misc:
+            env_ids = [*env_ids, "Pong-misc"]
     plot_episodic_return(
         project=project,
         entity=entity,
@@ -403,24 +410,17 @@ if __name__ == "__main__":
     #     env_name="Breakout MinAtar",
     # )
 
-    # (2) MinAtar 10M — 5 games in one figure; tags: MinAtar_10M + MoG|FFT|dqn; env from config or run name prefix.
-    plot_episodic_return(
+    # (2) MinAtar 10M — one figure, one panel per game; tags: MinAtar_10M + MoG|FFT|dqn.
+    #     Set include_pong_misc=True to add the Pong-misc panel (5 columns); default is 4 MinAtar games only.
+    plot_minatar_10m_grid(
         project="Deep-CVI-Experiments",
         entity=None,
-        required_tag=[],
-        algo_tags=["MoG", "FFT", "dqn"],
         experiment_tag="MinAtar_10M",
-        env_ids=[
-            "Asterix-MinAtar",
-            "Breakout-MinAtar",
-            "Freeway-MinAtar",
-            "SpaceInvaders-MinAtar",
-            "Pong-misc",
-        ],
+        include_pong_misc=False,
         use_run_name_for_env=True,
         metric="charts/episodic_return",
         step_metric="global_step",
-        out="figures/minatar_10m_5env_episodic_return.png",
+        out="figures/minatar_10m_episodic_return.png",
         grid_points=800,
         max_runs=2000,
         smooth_window=41,
