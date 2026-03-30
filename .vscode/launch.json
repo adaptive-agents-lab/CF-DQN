@@ -32,10 +32,20 @@
         // },
 
         {
-            "name": "plot_wandb_episodic_return",
+            "name": "plot minatar",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/plot_wandb_episodic_return.py",
+            "program": "${workspaceFolder}/plot_wandb_minatar.py",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "plot craftax",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/plot_wandb_craftax.py",
             "cwd": "${workspaceFolder}",
             "python": "${workspaceFolder}/.venv/bin/python",
             "console": "integratedTerminal",

@@ -29,7 +29,7 @@ try:
 except ImportError as e:
     raise SystemExit("Please install wandb: pip install wandb") from e
 
-from plot_wandb_episodic_return import (
+from plot_wandb_minatar import (
     _algo_group,
     _draw_algo_curves_on_ax,
     _interp_on_grid,
@@ -55,7 +55,7 @@ def plot_craftax_benchmark(
 ) -> None:
     """Load runs tagged ``experiment_tag`` and one of ``algo_tags``; optional filter by ``config.env_id``."""
     if algo_tags is None:
-        algo_tags = ["MoG", "dqn", "C51"]
+        algo_tags = ["MoG", "dqn", "C51", "QR-DQN", "IQN", "FQF"]
 
     required = [experiment_tag]
     api = wandb.Api()

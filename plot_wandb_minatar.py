@@ -183,7 +183,16 @@ def _draw_algo_curves_on_ax(
         ymax_track = max(ymax_track, float(np.nanmax(upper)))
         ymin_track = min(ymin_track, float(np.nanmin(lower)))
 
-        label = "DQN" if algo_tag == "dqn" else algo_tag
+        label_map = {
+            "dqn": "DQN",
+            "C51": "C51",
+            "MoG": "MoG",
+            "FFT": "FFT",
+            "QR-DQN": "QR-DQN",
+            "IQN": "IQN",
+            "FQF": "FQF",
+        }
+        label = label_map.get(algo_tag, algo_tag)
         c = colors[idx % len(colors)]
         ax.plot(grid, mean, color=c, linewidth=2.0, label=f"{label} (n={len(curves)})")
         ax.fill_between(grid, lower, upper, color=c, alpha=0.2)
@@ -238,7 +247,7 @@ def plot_episodic_return(
     if required_tag is None:
         required_tag = []
     if algo_tags is None:
-        algo_tags = ["MoG", "FFT", "dqn"]
+        algo_tags = ["MoG", "dqn", "C51", "QR-DQN", "IQN", "FQF"]
 
     required_effective = list(required_tag)
     if experiment_tag:
@@ -410,7 +419,7 @@ if __name__ == "__main__":
     #     env_name="Breakout MinAtar",
     # )
 
-    # (2) MinAtar 10M — one figure, one panel per game; tags: MinAtar_10M + MoG|FFT|dqn.
+    # (2) MinAtar 10M — one panel per game; tags: MinAtar_10M + MoG|dqn|C51|QR-DQN|IQN|FQF.
     #     Set include_pong_misc=True to add the Pong-misc panel (5 columns); default is 4 MinAtar games only.
     plot_minatar_10m_grid(
         project="Deep-CVI-Experiments",
@@ -418,6 +427,7 @@ if __name__ == "__main__":
         experiment_tag="MinAtar_10M",
         include_pong_misc=False,
         use_run_name_for_env=True,
+        algo_tags=["MoG", "dqn", "C51", "QR-DQN", "IQN", "FQF"],
         metric="charts/episodic_return",
         step_metric="global_step",
         out="figures/minatar_10m_episodic_return.png",
