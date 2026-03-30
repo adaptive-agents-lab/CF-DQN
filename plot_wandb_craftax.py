@@ -133,10 +133,17 @@ def plot_craftax_benchmark(
 
 
 if __name__ == "__main__":
+    # plot_craftax_benchmark(
+    #     project="Deep-CVI-Experiments",
+    #     entity=None,
+    #     experiment_tag="Craftax_50M",
+    #     env_id="Craftax-Classic-Symbolic-v1",
+    #     out="figures/craftax_50m_benchmark.png",
+    # )
     plot_craftax_benchmark(
         project="Deep-CVI-Experiments",
         entity=None,
-        experiment_tag="Craftax_50M",
+        experiment_tag="Craftax_100M",
         env_id="Craftax-Classic-Symbolic-v1",
-        out="figures/craftax_50m_benchmark.png",
+        out="figures/craftax_100m_benchmark.png",
     )
