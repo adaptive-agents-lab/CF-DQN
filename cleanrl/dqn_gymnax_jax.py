@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 
 import equinox as eqx
-import gymnax
+from cleanrl.craftax_env import make_env, get_obs_size, get_action_dim
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -64,23 +64,46 @@ class Args:
     """the maximum gradient norm for clipping"""
     log_interval: int = 10000
     """log metrics every this many env steps (also the scan chunk size)"""
+    hidden1: int = 120
+    """first hidden layer width (use 256 for Craftax)"""
+    hidden2: int = 84
+    """second hidden layer width (use 256 for Craftax)"""
+    hidden3: int = 0
+    """third hidden width; 0 = two-layer trunk. Use 128 with hidden1=hidden2=256 for Craftax."""
 
 
 class QNetwork(eqx.Module):
-    """Same MLP width as CF heads in cvi_dqn_nocollapse_jax (120 → 84 → A)."""
+    """MLP trunk: obs → hidden1 → hidden2 [→ hidden3 if set] → logits."""
 
     layers: list
     out: eqx.nn.Linear
     action_dim: int = eqx.field(static=True)
 
-    def __init__(self, obs_size: int, action_dim: int, *, key):
-        k1, k2, k3 = jax.random.split(key, 3)
+    def __init__(
+        self,
+        obs_size: int,
+        action_dim: int,
+        *,
+        key,
+        hidden1: int = 120,
+        hidden2: int = 84,
+        hidden3: int = 0,
+    ):
+        keys = jax.random.split(key, 5)
         self.action_dim = action_dim
-        self.layers = [
-            eqx.nn.Linear(obs_size, 120, key=k1),
-            eqx.nn.Linear(120, 84, key=k2),
-        ]
-        self.out = eqx.nn.Linear(84, action_dim, key=k3)
+        if hidden3 and hidden3 > 0:
+            self.layers = [
+                eqx.nn.Linear(obs_size, hidden1, key=keys[0]),
+                eqx.nn.Linear(hidden1, hidden2, key=keys[1]),
+                eqx.nn.Linear(hidden2, hidden3, key=keys[2]),
+            ]
+            self.out = eqx.nn.Linear(hidden3, action_dim, key=keys[3])
+        else:
+            self.layers = [
+                eqx.nn.Linear(obs_size, hidden1, key=keys[0]),
+                eqx.nn.Linear(hidden1, hidden2, key=keys[1]),
+            ]
+            self.out = eqx.nn.Linear(hidden2, action_dim, key=keys[2])
 
     def __call__(self, x):
         for layer in self.layers:
@@ -177,11 +200,9 @@ def soft_update_target(q_net, target_net, tau):
 
 
 def make_train(args):
-    env, env_params = gymnax.make(args.env_id)
-    obs_size = int(np.prod(env.obs_shape)) if hasattr(env, "obs_shape") else int(
-        np.prod(env.observation_space(env_params).shape)
-    )
-    action_dim = env.num_actions
+    env, env_params = make_env(args.env_id)
+    obs_size = get_obs_size(env, env_params)
+    action_dim = get_action_dim(env, env_params)
 
     num_env_steps = args.total_timesteps // args.num_envs
     chunk_steps = args.log_interval // args.num_envs
@@ -309,8 +330,22 @@ def make_train(args):
 
     def init_runner_state(key):
         key, q_key = jax.random.split(key)
-        q_net = QNetwork(obs_size, action_dim, key=q_key)
-        target_net = QNetwork(obs_size, action_dim, key=q_key)
+        q_net = QNetwork(
+            obs_size,
+            action_dim,
+            key=q_key,
+            hidden1=args.hidden1,
+            hidden2=args.hidden2,
+            hidden3=args.hidden3,
+        )
+        target_net = QNetwork(
+            obs_size,
+            action_dim,
+            key=q_key,
+            hidden1=args.hidden1,
+            hidden2=args.hidden2,
+            hidden3=args.hidden3,
+        )
         opt_state = optimizer.init(eqx.filter(q_net, eqx.is_array))
         rb = ReplayBufferState.create(args.buffer_size, obs_size)
 

@@ -29,6 +29,7 @@ dependencies = [
     "jax[cuda12]>=0.6.2",
     "equinox>=0.13.6",
     "gymnax>=0.0.9",
+    "craftax>=1.0.0",
     "optax>=0.2.8",
     "tensorboardX>=2.6",
 ]
