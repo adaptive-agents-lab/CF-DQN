@@ -30,6 +30,7 @@ except ImportError as e:
     raise SystemExit("Please install wandb: pip install wandb") from e
 
 from plot_wandb_minatar import (
+    _algo_colors,
     _algo_group,
     _draw_algo_curves_on_ax,
     _interp_on_grid,
@@ -72,7 +73,7 @@ def plot_craftax_benchmark(
         ("losses/cf_loss_imag", "CF loss |Im(residual)|", True),
     ]
 
-    colors = plt.cm.tab10(np.linspace(0, 0.9, max(len(algo_tags), 1)))
+    colors = _algo_colors(algo_tags)
     by_metric_algo: dict[str, dict[str, list]] = {m[0]: {a: [] for a in algo_tags} for m in metrics_rows}
 
     for run in runs:
@@ -132,7 +133,77 @@ def plot_craftax_benchmark(
     print(f"Wrote {out}")
 
 
+def plot_craftax_episodic_return_only(
+    *,
+    project: str = "Deep-CVI-Experiments",
+    entity: str | None = None,
+    experiment_tag: str = "Craftax_100M",
+    algo_tags: list[str] | None = None,
+    env_id: str | None = None,
+    step_metric: str = "global_step",
+    out: str = "figures/craftax_100m_episodic_return.png",
+    grid_points: int = 800,
+    max_runs: int = 2000,
+    smooth_window: int = 41,
+) -> None:
+    """Plot only charts/episodic_return for Craftax with fixed model colors."""
+    if algo_tags is None:
+        algo_tags = ["MoG", "dqn", "QR-DQN", "IQN"]
+
+    required = [experiment_tag]
+    api = wandb.Api()
+    path = _wandb_path(entity, project)
+    runs = list(api.runs(path, order="-created_at"))[:max_runs]
+
+    metric_key = "charts/episodic_return"
+    by_algo: dict[str, list] = {a: [] for a in algo_tags}
+    for run in runs:
+        if not _run_matches_required(run, required):
+            continue
+        if env_id is not None:
+            cfg = getattr(run, "config", None)
+            rid = cfg.get("env_id") if cfg is not None and hasattr(cfg, "get") else None
+            if rid is not None and str(rid) != env_id:
+                continue
+        g = _algo_group(run, algo_tags)
+        if g is None:
+            continue
+        series = _load_series(run, metric_key, step_metric)
+        if series is None:
+            continue
+        by_algo[g].append(series)
+        cfg = getattr(run, "config", None)
+        seed = cfg.get("seed") if cfg is not None and hasattr(cfg, "get") else None
+
+    if not any(len(by_algo.get(t, [])) > 0 for t in algo_tags):
+        raise RuntimeError("No runs matched for Craftax episodic return with the given filters.")
+
+    fig, ax = plt.subplots(1, 1, figsize=(10, 4.8))
+    _draw_algo_curves_on_ax(
+        ax,
+        by_algo,
+        algo_tags,
+        _algo_colors(algo_tags),
+        grid_points=grid_points,
+        smooth_window=smooth_window,
+        step_metric=step_metric,
+        metric=metric_key,
+        show_ylabel=True,
+        autoscale_y=True,
+        y_top_margin=0.12,
+        y_bottom=None,
+    )
+    ax.set_title("Episodic return", fontsize=10)
+    fig.suptitle(f"{experiment_tag} — Craftax episodic return", fontsize=12, y=1.02)
+    os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Wrote {out}")
+
+
 if __name__ == "__main__":
+    
     # plot_craftax_benchmark(
     #     project="Deep-CVI-Experiments",
     #     entity=None,
@@ -140,10 +211,21 @@ if __name__ == "__main__":
     #     env_id="Craftax-Classic-Symbolic-v1",
     #     out="figures/craftax_50m_benchmark.png",
     # )
-    plot_craftax_benchmark(
+    
+    # Full benchmark figure (all metrics):
+    # plot_craftax_benchmark(
+    #     project="Deep-CVI-Experiments",
+    #     entity=None,
+    #     experiment_tag="Craftax_100M",
+    #     env_id="Craftax-Classic-Symbolic-v1",
+    #     out="figures/craftax_100m_benchmark.png",
+    # )
+
+    # Episodic-return-only figure:
+    plot_craftax_episodic_return_only(
         project="Deep-CVI-Experiments",
         entity=None,
         experiment_tag="Craftax_100M",
         env_id="Craftax-Classic-Symbolic-v1",
-        out="figures/craftax_100m_benchmark.png",
+        out="figures/craftax_100m_episodic_return.png",
     )
